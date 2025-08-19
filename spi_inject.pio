@@ -1,0 +1,43 @@
+.pio_version 0
+
+.program spi_inject 
+.define in_cs_offset 2
+
+outer_override_none:
+	MOV PINS, PINS		; copy input to output
+outer_override_loop:
+	IN PINS, 2			; read CS
+	IN NULL, 32-2-1
+	MOV X, ISR
+	JMP !X outer_override_none
+
+	SET X, 0
+	PULL
+	MOV Y, OSR			; get mask and data do Y
+
+override_loop:
+	OUT X, 1			; get bit override
+	JMP !X override_loop_none
+	OUT PINS, 1			; output bit override
+	WAIT 1 IRQ 0		; wait for CLK=1 or SS=1
+	JMP override_finish
+override_loop_none:
+	MOV PINS, PINS
+	JMP PIN finish_override		; jump if CLK=1
+	JMP override_loop_none
+override_finish:
+	OUT Y, 30			; return unused mask+data back to Y
+	JMP override_loop
+
+
+do_irq:
+	IRQ set 0
+	IRQ clear 0
+.wrap_target
+clk_sync:
+	JMP PIN do_irq		; if CLK=1, jump
+	IN PINS, 2
+	IN NULL, 31
+	MOV X, ISR
+	JMP !X clk_sync
+.wrap
