@@ -1,0 +1,13 @@
+.pio_version 0
+
+.program mux
+
+.wrap_target
+mux_loop:
+	IN PINS 2
+	MOV OSR ISR
+	JMP PIN dm_default	; if the SEL pin is 0, propagate default pins
+	OUT NULL 1
+dm_default:
+	OUT PINS 1
+.wrap
