@@ -39,6 +39,8 @@ struct sysex_stream s_usb;
 uint sm[4];
 uint offset[4];
 
+bool do_echo = 0;
+
 
 void printbuf(uint8_t buf[], size_t len)
 {
@@ -159,9 +161,7 @@ int16_t read_firewire_request(struct sysex_stream *s)
 
 	//s->pos = 0;
 	while (gpio_get(P_IRQ1) == 0 && len == 0) {
-		printf("R");
 		spi_write_read_blocking(spi1, g_buf0, &s->in, 1);
-		printf("%02x\n", s->in);
 		len = sysex_stream_check(s);
 		/* TODO: check for non-empty len: if valid, just wait for nIRQ=1 */
 	}
@@ -185,6 +185,13 @@ int16_t read_uart_request(struct sysex_stream *s)
 	int c;
 
 	c = stdio_getchar_timeout_us(0);
+
+	if (s->pos == 0) {
+		if (c == '1')
+			do_echo = 1;
+		else if (c == '0')
+			do_echo = 0;
+	}
 	while (c >= 0) {
 		s->in = c;
 		/* TODO: timeout */
@@ -295,31 +302,35 @@ int main()
 
 	while (1) {
 #if 0
-		a0 = spi_is_readable(spi0);
-		a1 = spi_is_readable(spi1);
-		if (a0 || a1) {
-			/* SPI are drived by the same CLK/nSS, thus should be synced */
-			//while (spi_is_readable(spi1) == 0);
+		if (do_echo) {
+			a0 = spi_is_readable(spi0);
+			a1 = spi_is_readable(spi1);
+			if (a0 || a1) {
+				/* SPI are drived by the same CLK/nSS, thus should be synced */
+				//while (spi_is_readable(spi1) == 0);
 
-			u0 = spi_get_hw(spi0)->dr;
-			u1 = spi_get_hw(spi1)->dr;
+				u0 = spi_get_hw(spi0)->dr;
+				u1 = spi_get_hw(spi1)->dr;
 
-			//printf("0:%c %02x 1:%c %02x\n", a0 ? 'X': '.', u0, a1 ? 'X': '.', u1);
+				printf("0:%c %02x 1:%c %02x\n", a0 ? 'X': '.', u0, a1 ? 'X': '.', u1);
+			}
 		}
 #endif
-#if 0
+#if 1
 		if (gpio_get(P_IRQ1) == 0) {
-			len = read_firewire_request(&s_fw);
-			if (len > 0) {
-				printf("FW Req\n");
-				printbuf(s_fw.buf, len);
-
-				send_request(s_fw.buf, len);
-				len = read_response(s_fw.buf);
+			if (do_echo) {
+				len = read_firewire_request(&s_fw);
 				if (len > 0) {
-					printf("FW Resp\n");
+					printf("FW Req %d\n", len);
 					printbuf(s_fw.buf, len);
-					send_firewire_response(&s_fw, len);
+
+					send_request(s_fw.buf, len);
+					len = read_response(s_fw.buf);
+					if (len > 0) {
+						printf("FW Res %d\n", len);
+						printbuf(s_fw.buf, len);
+						send_firewire_response(&s_fw, len);
+					}
 				}
 			}
 		}
