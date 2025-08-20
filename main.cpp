@@ -64,6 +64,8 @@ int init_hw()
 
 	PIO mypio;
 
+	set_sys_clock_khz(200000, false);
+
 	stdio_init_all();
 	stdio_set_translate_crlf(&stdio_usb, false);
 
