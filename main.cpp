@@ -13,6 +13,8 @@
 #define P_IRQ1  12 // Input from DSPB
 #define P_IRQB  13 // Output to CPB
 
+#define P_NSS1_DSPB     19 // Injected nSS1
+
 #define P_MUX_SEL_NIRQ0 20
 #define P_MUX_SEL_MOSI1 21
 #define P_MUX_SEL_MISO0 22
@@ -63,6 +65,7 @@ int init_hw()
 	PIO mypio;
 
 	stdio_init_all();
+	stdio_set_translate_crlf(&stdio_usb, false);
 
 	for (i = 0; i < 4; i++) {
 		/* MUXed outputs */
@@ -78,9 +81,12 @@ int init_hw()
 
 	gpio_init(P_IRQ1);
 	gpio_init(P_IRQB);
+	gpio_init(P_NSS1_DSPB);
 	gpio_set_dir(P_IRQ1, 0);
 	gpio_set_dir(P_IRQB, 1);
+	gpio_set_dir(P_NSS1_DSPB, 1);
 	gpio_put(P_IRQB, 1);
+	gpio_put(P_NSS1_DSPB, 1);
 
 	offset = pio_add_program(pio0, &mux_program);
 
