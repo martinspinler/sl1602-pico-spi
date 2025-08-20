@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 
 #include <cstdint>
@@ -6,8 +7,13 @@
 #include "hardware/clocks.h"
 #include "pico/binary_info.h"
 #include "pico/stdlib.h"
+#include "pico/multicore.h"
+
 
 #include "mux.pio.h"
+
+#include "bsp/board_api.h"
+#include "tusb.h"
 
 
 #define P_IRQ1  12 // Input from DSPB
@@ -27,31 +33,47 @@
 struct sysex_stream {
 	uint8_t buf[BUF_LEN];
 	int16_t pos;
-//	int16_t len;
+	int16_t len;
 	uint8_t in;
 };
 
+
+
+#define IC_STREAMS 2    // Interception streams
+#define IJ_STREAMS 1    // Inject streams
+struct sysex_stream streams_ic0[IC_STREAMS];
+struct sysex_stream streams_ic1[IC_STREAMS];
+struct sysex_stream streams_ij_req[IJ_STREAMS];
+struct sysex_stream streams_ij_res[IJ_STREAMS];
+
+struct sysex_stream s_usbtmp;
+
+uint8_t ic_stream_wrptr = 0;
+uint8_t ic_stream_rdptr = 0;
+uint8_t ijreq_stream_wrptr = 0;
+uint8_t ijreq_stream_rdptr = 0;
+uint8_t ijres_stream_wrptr = 0;
+uint8_t ijres_stream_rdptr = 0;
+
+
 const uint8_t g_buf0[1] = {0};
 
-struct sysex_stream s_fw;
-struct sysex_stream s_usb;
-
-uint sm[4];
-uint offset[4];
+bool do_echo = 0;
 
 
 void printbuf(uint8_t buf[], size_t len)
 {
-	size_t i;
+	const int bpl = 16;
+
+	int i;
 	for (i = 0; i < len; ++i) {
-		if (i % 16 == 15)
+		if (i % bpl == bpl-1)
 			printf("%02x\n", buf[i]);
 		else
 			printf("%02x ", buf[i]);
 	}
 
-	// append trailing newline if there isn't one
-	if (i % 16) {
+	if (i % bpl) {
 		putchar('\n');
 	}
 }
@@ -128,41 +150,57 @@ int init_hw()
 	return 0;
 }
 
-int16_t sysex_stream_check(struct sysex_stream *s)
+void stream_clear(struct sysex_stream *s)
 {
-	uint16_t len;
+	s->pos = 0;
+	s->len = 0;
+}
+
+bool stream_filling(struct sysex_stream *s)
+{
+	return s->pos != 0;
+}
+
+bool stream_full(struct sysex_stream *s)
+{
+	return s->len != 0;
+}
+
+int16_t sysex_stream_check(struct sysex_stream *s, uint8_t c)
+{
+	s->in = c;
+
 	if (s->in == 0xF0) {
 		s->buf[0] = s->in;
 		s->pos = 1;
-		return 0;
+		return -s->pos;
 	} else if (s->pos > 0) {
 		s->buf[s->pos] = s->in;
 		s->pos++;
 
 		if (s->in == 0xF7) {
-			len = s->pos;
+			s->len = s->pos;
 			s->pos = 0;
-			return len;
+			return s->len;
 		} else if (s->pos >= BUF_LEN) {
 			s->pos = 0;
-			return -1;
+			return -2;
 		} else {
-			return 0;
+			return -s->pos;
 		}
 	}
-	return -1;
+	return 0;
 }
 
+#if 0
 int16_t read_firewire_request(struct sysex_stream *s)
 {
 	int16_t len = 0;
 
 	//s->pos = 0;
 	while (gpio_get(P_IRQ1) == 0 && len == 0) {
-		printf("R");
 		spi_write_read_blocking(spi1, g_buf0, &s->in, 1);
-		printf("%02x\n", s->in);
-		len = sysex_stream_check(s);
+		len = sysex_stream_check(s, s->in);
 		/* TODO: check for non-empty len: if valid, just wait for nIRQ=1 */
 	}
 	while (gpio_get(P_IRQ1) == 0);
@@ -178,6 +216,22 @@ void send_firewire_response(struct sysex_stream *s, uint16_t len)
 		while (spi_is_writable(spi0) == 0);
 	}
 }
+#endif
+
+void read_uart_cmd()
+{
+	int c;
+
+	c = stdio_getchar_timeout_us(0);
+
+	if (c == '1') {
+		do_echo = 1;
+		printf("Echo on\n");
+	} else if (c == '0') {
+		do_echo = 0;
+		printf("Echo off\n");
+	}
+}
 
 int16_t read_uart_request(struct sysex_stream *s)
 {
@@ -185,10 +239,16 @@ int16_t read_uart_request(struct sysex_stream *s)
 	int c;
 
 	c = stdio_getchar_timeout_us(0);
+
+	if (s->pos == 0) {
+		if (c == '1')
+			do_echo = 1;
+		else if (c == '0')
+			do_echo = 0;
+	}
 	while (c >= 0) {
-		s->in = c;
 		/* TODO: timeout */
-		len = sysex_stream_check(s);
+		len = sysex_stream_check(s, c);
 		if (len > 0)
 			return len;
 
@@ -206,7 +266,7 @@ void send_uart_response(struct sysex_stream *s, uint16_t len)
 	}
 	fflush(stdout);
 }
-
+#if 0
 int send_request(uint8_t *buf, uint16_t len)
 {
 	uint16_t pos;
@@ -222,6 +282,7 @@ int send_request(uint8_t *buf, uint16_t len)
 	gpio_put(P_IRQB, 1);
 	return 0;
 }
+#endif
 
 int read_response(uint8_t *buf)
 {
@@ -257,6 +318,7 @@ int read_response(uint8_t *buf)
 int transceive_request(const uint8_t *req, int reqlen, uint8_t *resp)
 {
 	int16_t len = 0;
+	uint8_t u0;
 
 	gpio_put(P_MUX_SEL_NSS1, 1);
 	gpio_put(P_MUX_SEL_MISO0, 1);
@@ -264,10 +326,16 @@ int transceive_request(const uint8_t *req, int reqlen, uint8_t *resp)
 
 	gpio_put(P_IRQB, 0);
 
-	spi_write_blocking(spi0, req, reqlen);
+	/* Need read too for FIFO cleanup */
+
+	while (spi_is_readable(spi0))
+		u0 = spi_get_hw(spi0)->dr;
+
+	spi_write_read_blocking(spi0, req, resp, reqlen);
 
 	gpio_put(P_IRQB, 1);
 
+	len = 0;
 	while (len == 0) {
 		len = read_response(resp);
 	}
@@ -278,57 +346,162 @@ int transceive_request(const uint8_t *req, int reqlen, uint8_t *resp)
 	return len;
 }
 
-int main()
+void core1_main()
 {
-	int16_t len;
-	int in = 0 ;
+	int i;
 	uint8_t u0 = 0;
 	uint8_t u1 = 0;
 	uint8_t a0 = 0;
 	uint8_t a1 = 0;
-	int is_inited = 0;
-	int can_send = 0;
-	int msSinceBoot;
-	int state = 0;
 
-	init_hw();
+	uint8_t si;
+	bool stream_ready;
+
+	struct sysex_stream *ic0, *ic1, *ij_req, *ij_res;
+
+	for (i = 0; i < 16; i++) {
+		u0 = spi_get_hw(spi0)->dr;
+		u1 = spi_get_hw(spi1)->dr;
+	}
+	for (i = 0; i < IC_STREAMS; i++) {
+		stream_clear(&streams_ic0[i]);
+		stream_clear(&streams_ic1[i]);
+	}
 
 	while (1) {
-#if 0
+		si = ic_stream_wrptr % IC_STREAMS;
+		ic0 = &streams_ic0[si];
+		ic1 = &streams_ic1[si];
+
 		a0 = spi_is_readable(spi0);
 		a1 = spi_is_readable(spi1);
-		if (a0 || a1) {
-			/* SPI are drived by the same CLK/nSS, thus should be synced */
-			//while (spi_is_readable(spi1) == 0);
-
+		/* SPI are drived by the same CLK/nSS, thus should be synced */
+		if (a0 && a1) {
 			u0 = spi_get_hw(spi0)->dr;
 			u1 = spi_get_hw(spi1)->dr;
 
-			//printf("0:%c %02x 1:%c %02x\n", a0 ? 'X': '.', u0, a1 ? 'X': '.', u1);
-		}
-#endif
-#if 0
-		if (gpio_get(P_IRQ1) == 0) {
-			len = read_firewire_request(&s_fw);
-			if (len > 0) {
-				printf("FW Req\n");
-				printbuf(s_fw.buf, len);
+			stream_ready = ic_stream_wrptr - ic_stream_rdptr < IC_STREAMS;
 
-				send_request(s_fw.buf, len);
-				len = read_response(s_fw.buf);
-				if (len > 0) {
-					printf("FW Resp\n");
-					printbuf(s_fw.buf, len);
-					send_firewire_response(&s_fw, len);
+			if (stream_ready) {
+				sysex_stream_check(ic0, u0);
+				sysex_stream_check(ic1, u1);
+
+				if (stream_full(ic0)) {
+					__dmb();
+					ic_stream_wrptr++;
 				}
 			}
 		}
-#endif
-		len = read_uart_request(&s_usb);
-		if (len > 0) {
-			len = transceive_request(s_usb.buf, len, s_usb.buf);
-			if (len > 0) {
-				send_uart_response(&s_usb, len);
+
+		/* TODO: Enable injecting request after DSPB init! */
+		if (!stream_filling(ic0) && !stream_filling(ic1)) {
+			stream_ready = ijreq_stream_wrptr != ijreq_stream_rdptr;
+			si = ijreq_stream_rdptr % IJ_STREAMS;
+			ij_req = &streams_ij_req[si];
+			ij_res = &streams_ij_res[si];
+
+			if (stream_ready && stream_full(ij_req) && gpio_get(P_IRQ1) == 1) {
+				gpio_put(P_IRQB, 0);
+				gpio_put(P_MUX_SEL_NIRQ0, 1);
+				/* Paranoia */
+				if (gpio_get(P_IRQ1) == 1) {
+					gpio_put(P_MUX_SEL_NIRQ0, 0);
+					gpio_put(P_IRQB, 1);
+				} else {
+					ij_res->len = transceive_request(ij_req->buf, ij_req->len, ij_res->buf);
+
+					stream_clear(ij_req);
+
+					__dmb();
+					ijres_stream_wrptr++;
+					ijreq_stream_rdptr++;
+				}
+			}
+		}
+	}
+}
+
+int main()
+{
+	int16_t i;
+	int16_t len;
+	int16_t ijres_tmp_pos = 0;
+	uint8_t si;
+	bool stream_ready;
+
+	struct sysex_stream *s;
+
+	board_init();
+	tusb_init();
+
+	init_hw();
+	multicore_launch_core1(core1_main);
+
+	stream_clear(&s_usbtmp);
+	for (i = 0; i < IJ_STREAMS; i++) {
+		stream_clear(&streams_ij_req[i]);
+		stream_clear(&streams_ij_res[i]);
+	}
+
+	while (1) {
+		tud_task();
+		read_uart_cmd();
+
+		/* Pull intercept streams (both streams are input, synchronized) and print */
+		stream_ready = ic_stream_wrptr != ic_stream_rdptr;
+		if (stream_ready) {
+			si = ic_stream_rdptr % IC_STREAMS;
+
+			s = &streams_ic1[si];
+			if (do_echo & 1) {
+				printf("FW Req %d\n", s->len);
+				printbuf(s->buf, s->len);
+			}
+			stream_clear(s);
+
+			s = &streams_ic0[si];
+			if (do_echo & 1) {
+				printf("FW Res %d\n", s->len);
+				printbuf(s->buf, s->len);
+			}
+			stream_clear(s);
+
+			__dmb();
+			ic_stream_rdptr++;
+		}
+
+		/* Push inject stream readen from UART/USB-CDC */
+		stream_ready = ijreq_stream_wrptr - ijreq_stream_rdptr < IJ_STREAMS;
+		if (stream_ready) {
+			si = ijreq_stream_wrptr % IJ_STREAMS;
+			s = &streams_ij_req[si];
+			s_usbtmp.len = tud_midi_n_stream_read(0, 0, s_usbtmp.buf, BUF_LEN);
+			for (i = 0; i < s_usbtmp.len; i++) {
+				len = sysex_stream_check(s, s_usbtmp.buf[i]);
+				if (len > 0) {
+					if (do_echo & 1)
+						printf("USB Req %d\n", s->len);
+					__dmb();
+					ijreq_stream_wrptr++;
+				}
+			}
+		}
+
+		/* Pull inject stream and write to UART/USB-CDC */
+		stream_ready = ijres_stream_wrptr != ijres_stream_rdptr;
+		if (stream_ready) {
+			si = ijres_stream_rdptr % IJ_STREAMS;
+			s = &streams_ij_res[si];
+			len = tud_midi_n_stream_write(0, 0, s->buf + ijres_tmp_pos, s->len - ijres_tmp_pos);
+			ijres_tmp_pos += len;
+			if (ijres_tmp_pos == s->len) {
+				if (do_echo & 1)
+					printf("USB Res %d\n", s->len);
+
+				stream_clear(s);
+				ijres_tmp_pos = 0;
+				__dmb();
+				ijres_stream_rdptr++;
 			}
 		}
 	}

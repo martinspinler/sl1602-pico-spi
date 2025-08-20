@@ -6,11 +6,20 @@ include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 project(${PROJECT} C CXX ASM)
 
 pico_sdk_init()
-add_executable(${PROJECT} main.cpp)
+add_executable(${PROJECT})
+target_sources(${PROJECT} PUBLIC
+	${CMAKE_CURRENT_LIST_DIR}/main.cpp
+	${CMAKE_CURRENT_LIST_DIR}/usb_descriptors.c
+)
+
+target_include_directories(${PROJECT} PUBLIC
+	${CMAKE_CURRENT_LIST_DIR}
+)
+target_compile_options(${PROJECT} PUBLIC -DPICO_STDIO_USB_ENABLE_RESET_VIA_VENDOR_INTERFACE=1)
 
 pico_generate_pio_header(sl1602_spi_bridge ${CMAKE_CURRENT_LIST_DIR}/mux.pio)
 
-target_link_libraries(${PROJECT} pico_stdlib hardware_spi hardware_pio)
+target_link_libraries(${PROJECT} pico_stdlib hardware_spi hardware_pio pico_multicore tinyusb_device tinyusb_board)
 pico_add_extra_outputs(${PROJECT})
 pico_enable_stdio_usb(${PROJECT} 1)
 pico_enable_stdio_uart(${PROJECT} 0)
