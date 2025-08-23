@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 
 #include <cstdint>
@@ -10,6 +11,9 @@
 
 
 #include "mux.pio.h"
+
+#include "bsp/board_api.h"
+#include "tusb.h"
 
 
 #define P_IRQ1  12 // Input from DSPB
@@ -41,6 +45,8 @@ struct sysex_stream streams_ic0[IC_STREAMS];
 struct sysex_stream streams_ic1[IC_STREAMS];
 struct sysex_stream streams_ij_req[IJ_STREAMS];
 struct sysex_stream streams_ij_res[IJ_STREAMS];
+
+struct sysex_stream s_usbtmp;
 
 uint8_t ic_stream_wrptr = 0;
 uint8_t ic_stream_rdptr = 0;
@@ -162,8 +168,6 @@ bool stream_full(struct sysex_stream *s)
 
 int16_t sysex_stream_check(struct sysex_stream *s, uint8_t c)
 {
-	uint16_t len;
-
 	s->in = c;
 
 	if (s->in == 0xF0) {
@@ -175,9 +179,9 @@ int16_t sysex_stream_check(struct sysex_stream *s, uint8_t c)
 		s->pos++;
 
 		if (s->in == 0xF7) {
-			len = s->pos;
+			s->len = s->pos;
 			s->pos = 0;
-			return len;
+			return s->len;
 		} else if (s->pos >= BUF_LEN) {
 			s->pos = 0;
 			return -2;
@@ -187,6 +191,7 @@ int16_t sysex_stream_check(struct sysex_stream *s, uint8_t c)
 	}
 	return 0;
 }
+
 #if 0
 int16_t read_firewire_request(struct sysex_stream *s)
 {
@@ -212,6 +217,21 @@ void send_firewire_response(struct sysex_stream *s, uint16_t len)
 	}
 }
 #endif
+
+void read_uart_cmd()
+{
+	int c;
+
+	c = stdio_getchar_timeout_us(0);
+
+	if (c == '1') {
+		do_echo = 1;
+		printf("Echo on\n");
+	} else if (c == '0') {
+		do_echo = 0;
+		printf("Echo off\n");
+	}
+}
 
 int16_t read_uart_request(struct sysex_stream *s)
 {
@@ -315,6 +335,7 @@ int transceive_request(const uint8_t *req, int reqlen, uint8_t *resp)
 
 	gpio_put(P_IRQB, 1);
 
+	len = 0;
 	while (len == 0) {
 		len = read_response(resp);
 	}
@@ -328,8 +349,6 @@ int transceive_request(const uint8_t *req, int reqlen, uint8_t *resp)
 void core1_main()
 {
 	int i;
-	int16_t len0;
-	int16_t len1;
 	uint8_t u0 = 0;
 	uint8_t u1 = 0;
 	uint8_t a0 = 0;
@@ -364,8 +383,8 @@ void core1_main()
 			stream_ready = ic_stream_wrptr - ic_stream_rdptr < IC_STREAMS;
 
 			if (stream_ready) {
-				len0 = sysex_stream_check(ic0, u0);
-				len1 = sysex_stream_check(ic1, u1);
+				sysex_stream_check(ic0, u0);
+				sysex_stream_check(ic1, u1);
 
 				if (stream_full(ic0)) {
 					ic_stream_wrptr++;
@@ -374,7 +393,7 @@ void core1_main()
 		}
 
 		/* TODO: Enable injecting request after DSPB init! */
-		if (!stream_filling(ic0) && !stream_filling(ic1)) { 
+		if (!stream_filling(ic0) && !stream_filling(ic1)) {
 			stream_ready = ijreq_stream_wrptr != ijreq_stream_rdptr;
 			si = ijreq_stream_rdptr % IJ_STREAMS;
 			ij_req = &streams_ij_req[si];
@@ -392,8 +411,8 @@ void core1_main()
 
 					stream_clear(ij_req);
 
-					ijreq_stream_rdptr++;
 					ijres_stream_wrptr++;
+					ijreq_stream_rdptr++;
 				}
 			}
 		}
@@ -402,22 +421,30 @@ void core1_main()
 
 int main()
 {
-	int i;
+	int16_t i;
 	int16_t len;
+	int16_t ijres_tmp_pos = 0;
 	uint8_t si;
 	bool stream_ready;
 
 	struct sysex_stream *s;
 
+	board_init();
+	tusb_init();
+
 	init_hw();
 	multicore_launch_core1(core1_main);
 
+	stream_clear(&s_usbtmp);
 	for (i = 0; i < IJ_STREAMS; i++) {
 		stream_clear(&streams_ij_req[i]);
 		stream_clear(&streams_ij_res[i]);
 	}
 
 	while (1) {
+		tud_task();
+		read_uart_cmd();
+
 		/* Pull intercept streams (both streams are input, synchronized) and print */
 		stream_ready = ic_stream_wrptr != ic_stream_rdptr;
 		if (stream_ready) {
@@ -445,21 +472,32 @@ int main()
 		if (stream_ready) {
 			si = ijreq_stream_wrptr % IJ_STREAMS;
 			s = &streams_ij_req[si];
-			len = read_uart_request(s);
-			if (len > 0) {
-				ijreq_stream_wrptr++;
+			s_usbtmp.len = tud_midi_n_stream_read(0, 0, s_usbtmp.buf, BUF_LEN);
+			for (i = 0; i < s_usbtmp.len; i++) {
+				len = sysex_stream_check(s, s_usbtmp.buf[i]);
+				if (len > 0) {
+					if (do_echo & 1)
+						printf("USB Req %d\n", s->len);
+					ijreq_stream_wrptr++;
+				}
 			}
 		}
 
 		/* Pull inject stream and write to UART/USB-CDC */
 		stream_ready = ijres_stream_wrptr != ijres_stream_rdptr;
 		if (stream_ready) {
-			si = ijres_stream_wrptr % IJ_STREAMS;
+			si = ijres_stream_rdptr % IJ_STREAMS;
 			s = &streams_ij_res[si];
-			send_uart_response(s, s->len);
-			ijres_stream_wrptr++;
+			len = tud_midi_n_stream_write(0, 0, s->buf + ijres_tmp_pos, s->len - ijres_tmp_pos);
+			ijres_tmp_pos += len;
+			if (ijres_tmp_pos == s->len) {
+				if (do_echo & 1)
+					printf("USB Res %d\n", s->len);
 
-			stream_clear(s);
+				stream_clear(s);
+				ijres_tmp_pos = 0;
+				ijres_stream_rdptr++;
+			}
 		}
 	}
 
