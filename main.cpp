@@ -160,6 +160,11 @@ void stream_clear(struct sysex_stream *s)
 	s->len = 0;
 }
 
+bool stream_cleared(struct sysex_stream *s)
+{
+	return s->pos == 0;
+}
+
 bool stream_filling(struct sysex_stream *s)
 {
 	return s->pos != 0;
@@ -318,6 +323,7 @@ int read_response(uint8_t *buf)
 				pos++;
 			}
 		} else {
+			/* HOTFIX: skip null status byte */
 			if (pos == 1 && in == 0) {
 				g_st |= 0x400;
 				continue;
@@ -433,7 +439,7 @@ void core1_main()
 		}
 
 		/* TODO: Enable injecting request after DSPB init! */
-		if (!stream_filling(ic0) && !stream_filling(ic1)) {
+		if (stream_cleared(ic0) && stream_cleared(ic1)) {
 			stream_ready = ijreq_stream_wrptr != ijreq_stream_rdptr;
 			si = ijreq_stream_rdptr % IJ_STREAMS;
 			ij_req = &streams_ij_req[si];
