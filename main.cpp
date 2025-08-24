@@ -318,6 +318,11 @@ int read_response(uint8_t *buf)
 				pos++;
 			}
 		} else {
+			if (pos == 1 && in == 0) {
+				g_st |= 0x400;
+				continue;
+			}
+
 			/* TODO: BUF len limit */
 			if (pos < BUF_LEN-1) {
 				pos++;
