@@ -458,7 +458,7 @@ void core1_main()
 		u0 = 0xFE;
 		u1 = 0xFE;
 		/* SPI are drived by the same CLK/nSS, thus should be synced */
-		if (a0 || a1) {
+		if (a0 && a1) {
 			if (a0) {
 				u0 = spi_get_hw(spi0)->dr;
 			}
