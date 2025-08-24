@@ -1,6 +1,4 @@
-
 #include <stdio.h>
-
 #include <cstdint>
 
 #include "hardware/spi.h"
@@ -8,7 +6,6 @@
 #include "pico/binary_info.h"
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
-
 
 #include "mux.pio.h"
 
@@ -26,13 +23,18 @@
 #define P_MUX_SEL_MISO0 22
 #define P_MUX_SEL_NSS1  26
 
+#define IC_STREAMS 2    // Interception streams
+#define IJ_STREAMS 1    // Inject streams
 
 #define BUF_LEN 128
+#define BUF_STATUS_LEN 47
+
 #define BR_DEBUG 1
 #define MC_EN 1			// Enable multicore
 #define MC_DIS (!MC_EN)
 
 #define PRINTBUF_MAX 64
+#define PRINTBUF_BPL 64
 
 struct sysex_stream {
 	uint8_t buf[BUF_LEN];
@@ -42,9 +44,6 @@ struct sysex_stream {
 };
 
 
-
-#define IC_STREAMS 2    // Interception streams
-#define IJ_STREAMS 1    // Inject streams
 struct sysex_stream streams_ic0[IC_STREAMS];
 struct sysex_stream streams_ic1[IC_STREAMS];
 struct sysex_stream streams_ij_req[IJ_STREAMS];
@@ -63,26 +62,24 @@ uint8_t ijres_stream_rdptr = 0;
 
 const uint8_t g_buf0[1] = {0};
 
-uint8_t buf_status[47] = {0};
+uint8_t buf_status[BUF_STATUS_LEN] = {0};
 
-bool do_echo = 1;
+bool do_echo = 0;
 bool do_filter_status = 1;
 bool do_filter_request = 0;
 
 
 void printbuf(uint8_t buf[], size_t len)
 {
-	const int bpl = 64;
-
-	int i;
+	size_t i;
 	for (i = 0; i < len; ++i) {
-		if (i % bpl == bpl-1)
+		if (i % PRINTBUF_BPL == PRINTBUF_BPL -1)
 			printf("%02x\n", buf[i]);
 		else
 			printf("%02x ", buf[i]);
 	}
 
-	if (i % bpl) {
+	if (i % PRINTBUF_BPL) {
 		putchar('\n');
 	}
 }
@@ -170,11 +167,6 @@ bool stream_cleared(struct sysex_stream *s)
 	return s->pos == 0;
 }
 
-bool stream_filling(struct sysex_stream *s)
-{
-	return s->pos != 0;
-}
-
 bool stream_full(struct sysex_stream *s)
 {
 	return s->len != 0;
@@ -206,32 +198,6 @@ int16_t sysex_stream_check(struct sysex_stream *s, uint8_t c)
 	return 0;
 }
 
-#if 0
-int16_t read_firewire_request(struct sysex_stream *s)
-{
-	int16_t len = 0;
-
-	//s->pos = 0;
-	while (gpio_get(P_IRQ1) == 0 && len == 0) {
-		spi_write_read_blocking(spi1, g_buf0, &s->in, 1);
-		len = sysex_stream_check(s, s->in);
-		/* TODO: check for non-empty len: if valid, just wait for nIRQ=1 */
-	}
-	while (gpio_get(P_IRQ1) == 0);
-
-	return len;
-}
-
-void send_firewire_response(struct sysex_stream *s, uint16_t len)
-{
-	s->pos = 0;
-	while (s->pos < len) {
-		spi_get_hw(spi1)->dr = s->buf[s->pos++];
-		while (spi_is_writable(spi0) == 0);
-	}
-}
-#endif
-
 void read_uart_cmd()
 {
 	int c;
@@ -261,59 +227,6 @@ void read_uart_cmd()
 	}
 }
 
-#if 0
-int16_t read_uart_request(struct sysex_stream *s)
-{
-	int16_t len = 0;
-	int c;
-
-	c = stdio_getchar_timeout_us(0);
-
-	if (s->pos == 0) {
-		if (c == '1')
-			do_echo = 1;
-		else if (c == '0')
-			do_echo = 0;
-	}
-	while (c >= 0) {
-		/* TODO: timeout */
-		len = sysex_stream_check(s, c);
-		if (len > 0)
-			return len;
-
-		c = stdio_getchar_timeout_us(0);
-	}
-
-	return len;
-}
-
-void send_uart_response(struct sysex_stream *s, uint16_t len)
-{
-	s->pos = 0;
-	while (s->pos < len) {
-		printf("%c", s->buf[s->pos++]);
-	}
-	fflush(stdout);
-}
-#endif
-#if 0
-int send_request(uint8_t *buf, uint16_t len)
-{
-	uint16_t pos;
-
-	pos = 0;
-	while (pos < len) {
-		spi_get_hw(spi0)->dr = buf[pos++];
-		gpio_put(P_IRQB, 0);
-		while (spi_is_writable(spi0) == 0);
-	}
-
-	/* CHECKME: deassert at last byte? */
-	gpio_put(P_IRQB, 1);
-	return 0;
-}
-#endif
-
 int read_response(uint8_t *buf)
 {
 	bool readable;
@@ -327,9 +240,6 @@ int read_response(uint8_t *buf)
 		readable = spi_is_readable(spi0);
 		if (absolute_time_diff_us(to, get_absolute_time()) > 0) {
 			g_st |= 0x400;
-#if MC_DIS
-			printf("Timeout: %d %llu %llu\n", pos, to, get_absolute_time());
-#endif
 			return 0;
 		}
 		if (!readable)
@@ -344,18 +254,16 @@ int read_response(uint8_t *buf)
 				pos++;
 			}
 		} else {
-			/* HOTFIX: skip null status byte */
+			/* HOTFIX (maybe not needed): skip null status byte */
 			if (pos == 1 && in == 0) {
 				g_st |= 0x400;
-#if MC_DIS
-				printf("-Q-");
-#endif
 				continue;
 			}
 
-			/* TODO: BUF len limit */
 			if (pos < BUF_LEN-1) {
 				pos++;
+			} else {
+				g_st |= 0x800;
 			}
 
 			if (in == 0xF7) {
@@ -367,28 +275,11 @@ int read_response(uint8_t *buf)
 	return len;
 }
 
-int transceive_request(const uint8_t *req, int reqlen, uint8_t *resp)
+int transceive_request(const uint8_t *req, int16_t reqlen, uint8_t *resp)
 {
-	int16_t len = 0;
+	int16_t len;
 	uint8_t u0;
 
-	gpio_put(P_MUX_SEL_NSS1, 1);
-	gpio_put(P_MUX_SEL_MISO0, 1);
-	gpio_put(P_MUX_SEL_NIRQ0, 1);
-
-
-#if MC_DIS
-	printf("TR REQ %d", reqlen);
-	printbuf(req, reqlen);
-#endif
-
-	/* Need read too for FIFO cleanup */
-	while (spi_is_readable(spi0))
-		u0 = spi_get_hw(spi0)->dr;
-
-	gpio_put(P_IRQB, 0);
-
-#if BR_DEBUG
 	u0 = 0;
 	for (len = 0; len < reqlen; len++) {
 		if (req[len] == 0xf0)
@@ -397,31 +288,36 @@ int transceive_request(const uint8_t *req, int reqlen, uint8_t *resp)
 			u0 |= 0x2;
 	}
 	/* Error: no SOF/EOF in SysEx */
-	if (u0 & 1 == 0)
-		g_st |= 0x100;
-	if (u0 & 2 == 0)
-		g_st |= 0x200;
-#endif
+	if (u0) {
+		if (u0 & 1 == 0)
+			g_st |= 0x100;
+		if (u0 & 2 == 0)
+			g_st |= 0x200;
+		return 0;
+	}
 
+	gpio_put(P_MUX_SEL_NSS1, 1);
+	gpio_put(P_MUX_SEL_MISO0, 1);
+	gpio_put(P_MUX_SEL_NIRQ0, 1);
+
+	/* Need read too for FIFO cleanup */
 	while (spi_is_readable(spi0))
 		u0 = spi_get_hw(spi0)->dr;
+
+	gpio_put(P_IRQB, 0);
 
 	for (len = 0; len < reqlen; len++) {
 		while (spi_is_writable(spi0) == 0);
 		spi_get_hw(spi0)->dr = req[len];
 
-
 		while (spi_is_readable(spi0) == 0);
 		u0 = spi_get_hw(spi0)->dr;
-		//printf("%02x ", u0);
 	}
-//	printf("TR REQ complete\n");
 
+	/* INFO: Too early here: deassert in read_response */
 //	gpio_put(P_IRQB, 1);
 
 	len = read_response(resp);
-//	printf("TR RES %d", len);
-//	printbuf(resp, len);
 
 	gpio_put(P_MUX_SEL_NSS1, 0);
 	gpio_put(P_MUX_SEL_MISO0, 0);
@@ -575,11 +471,11 @@ int main()
 			s = &streams_ic0[si];
 			if (do_echo & 1) {
 				filter = 0;
-				if (s->len == 47 && s->buf[1] == 0x39 && s->buf[2] == 0x03 && do_filter_status) {
-					if (memcmp(s->buf, buf_status, 47) == 0) {
+				if (s->len == BUF_STATUS_LEN && s->buf[1] == 0x39 && s->buf[2] == 0x03 && do_filter_status) {
+					if (memcmp(s->buf, buf_status, BUF_STATUS_LEN) == 0) {
 						filter = 1;
 					} else {
-						memcpy(buf_status, s->buf, 47);
+						memcpy(buf_status, s->buf, BUF_STATUS_LEN);
 					}
 				}
 				if (!filter) {
