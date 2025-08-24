@@ -67,6 +67,7 @@ uint8_t buf_status[47] = {0};
 
 bool do_echo = 1;
 bool do_filter_status = 1;
+bool do_filter_request = 0;
 
 
 void printbuf(uint8_t buf[], size_t len)
@@ -247,6 +248,10 @@ void read_uart_cmd()
 		do_filter_status = 0;
 	} else if (c == 'f') {
 		do_filter_status = 1;
+	} else if (c == 'Q') {
+		do_filter_request = 0;
+	} else if (c == 'q') {
+		do_filter_request = 1;
 	} else if (c == 'S') {
 		/* Clear status */
 		g_st = 0;
@@ -554,7 +559,7 @@ int main()
 			si = ic_stream_rdptr % IC_STREAMS;
 
 			s = &streams_ic1[si];
-			if (do_echo & 1) {
+			if (do_echo & 1 && do_filter_request == 0) {
 				filter = 0;
 				if (s->len == 4 && s->buf[1] == 0x38 && s->buf[2] == 0x03 && do_filter_status) {
 					filter = 1;
