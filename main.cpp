@@ -387,6 +387,7 @@ void core1_main()
 				sysex_stream_check(ic1, u1);
 
 				if (stream_full(ic0)) {
+					__dmb();
 					ic_stream_wrptr++;
 				}
 			}
@@ -411,6 +412,7 @@ void core1_main()
 
 					stream_clear(ij_req);
 
+					__dmb();
 					ijres_stream_wrptr++;
 					ijreq_stream_rdptr++;
 				}
@@ -464,6 +466,7 @@ int main()
 			}
 			stream_clear(s);
 
+			__dmb();
 			ic_stream_rdptr++;
 		}
 
@@ -478,6 +481,7 @@ int main()
 				if (len > 0) {
 					if (do_echo & 1)
 						printf("USB Req %d\n", s->len);
+					__dmb();
 					ijreq_stream_wrptr++;
 				}
 			}
@@ -496,6 +500,7 @@ int main()
 
 				stream_clear(s);
 				ijres_tmp_pos = 0;
+				__dmb();
 				ijres_stream_rdptr++;
 			}
 		}
