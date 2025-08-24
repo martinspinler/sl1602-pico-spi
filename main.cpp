@@ -472,14 +472,10 @@ void core1_main()
 			ij_req = &streams_ij_req[si];
 			ij_res = &streams_ij_res[si];
 
-			if (stream_ready && stream_full(ij_req) && gpio_get(P_IRQ1) == 1) {
-				gpio_put(P_IRQB, 0);
-				gpio_put(P_MUX_SEL_NIRQ0, 1);
+			if (stream_ready /*&& stream_full(ij_req)*/ && gpio_get(P_IRQ1) == 1) {
 				/* Paranoia */
+				gpio_put(P_MUX_SEL_NIRQ0, 1);
 				if (gpio_get(P_IRQ1) == 1) {
-					gpio_put(P_MUX_SEL_NIRQ0, 0);
-					gpio_put(P_IRQB, 1);
-				} else {
 					ij_res->len = transceive_request(ij_req->buf, ij_req->len, ij_res->buf);
 
 					stream_clear(ij_req);
@@ -487,6 +483,8 @@ void core1_main()
 					__dmb();
 					ijres_stream_wrptr++;
 					ijreq_stream_rdptr++;
+				} else {
+					gpio_put(P_MUX_SEL_NIRQ0, 0);
 				}
 			}
 		}
