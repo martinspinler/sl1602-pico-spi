@@ -233,12 +233,18 @@ void read_uart_cmd()
 
 	c = stdio_getchar_timeout_us(0);
 
-	if (c == '1') {
+	if (c == 'e') {
 		do_echo = 1;
 		printf("Echo on\n");
-	} else if (c == '0') {
+	} else if (c == 'E') {
 		do_echo = 0;
 		printf("Echo off\n");
+	} else if (c == 'S') {
+		/* Clear status */
+		g_st = 0;
+	} else if (c == 's') {
+		printf("Status: St: %04x", g_st);
+		printf("\n");
 	}
 }
 
@@ -387,15 +393,22 @@ int transceive_request(const uint8_t *req, int reqlen, uint8_t *resp)
 	while (spi_is_readable(spi0))
 		u0 = spi_get_hw(spi0)->dr;
 
-	spi_write_read_blocking(spi0, req, resp, reqlen);
+	for (len = 0; len < reqlen; len++) {
+		while (spi_is_writable(spi0) == 0);
+		spi_get_hw(spi0)->dr = req[len];
 
-	gpio_put(P_IRQB, 1);
 
-	len = 0;
-	while (len == 0) {
-		len = read_response(resp);
+		while (spi_is_readable(spi0) == 0);
+		u0 = spi_get_hw(spi0)->dr;
+		//printf("%02x ", u0);
 	}
+//	printf("TR REQ complete\n");
+
+//	gpio_put(P_IRQB, 1);
+
 	len = read_response(resp);
+//	printf("TR RES %d", len);
+//	printbuf(resp, len);
 
 	gpio_put(P_MUX_SEL_NSS1, 0);
 	gpio_put(P_MUX_SEL_MISO0, 0);
@@ -416,7 +429,6 @@ void core1_main()
 
 	struct sysex_stream *ic0, *ic1, *ij_req, *ij_res;
 
-	stream_ptrs *p = &ptrs;
 
 	static int c1_inited = 0;
 
@@ -443,6 +455,8 @@ void core1_main()
 
 		a0 = spi_is_readable(spi0);
 		a1 = spi_is_readable(spi1);
+		u0 = 0xFE;
+		u1 = 0xFE;
 		/* SPI are drived by the same CLK/nSS, thus should be synced */
 		if (a0 || a1) {
 			if (a0) {
@@ -468,8 +482,11 @@ void core1_main()
 		/* TODO: Enable injecting request after DSPB init! */
 		if (stream_cleared(ic0) && stream_cleared(ic1)) {
 			stream_ready = ijreq_stream_wrptr != ijreq_stream_rdptr;
+
 			si = ijreq_stream_rdptr % IJ_STREAMS;
 			ij_req = &streams_ij_req[si];
+
+			si = ijres_stream_wrptr % IJ_STREAMS;
 			ij_res = &streams_ij_res[si];
 
 			if (stream_ready /*&& stream_full(ij_req)*/ && gpio_get(P_IRQ1) == 1) {
@@ -529,15 +546,15 @@ int main()
 
 			s = &streams_ic1[si];
 			if (do_echo & 1) {
-				printf("FW Req %d\n", s->len);
-				printbuf(s->buf, s->len);
+				printf("F2M %d: ", s->len);
+				printbuf(s->buf, s->len < 16 ? s->len : 16);
 			}
 			stream_clear(s);
 
 			s = &streams_ic0[si];
 			if (do_echo & 1) {
-				printf("FW Res %d\n", s->len);
-				printbuf(s->buf, s->len);
+				printf("M2F %d: ", s->len);
+				printbuf(s->buf, s->len < 16 ? s->len : 16);
 			}
 			stream_clear(s);
 
