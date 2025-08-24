@@ -292,14 +292,24 @@ int send_request(uint8_t *buf, uint16_t len)
 
 int read_response(uint8_t *buf)
 {
+	bool readable;
 	uint16_t pos = 0;
 	uint16_t len = 0;
 	uint8_t in;
 
+	static absolute_time_t to;
+	to = make_timeout_time_us(1000000);
 	while (len == 0) {
-		spi_get_hw(spi0)->dr = 0;
-		while (spi_is_readable(spi0) == 0);
+		readable = spi_is_readable(spi0);
+		if (absolute_time_diff_us(to, get_absolute_time()) > 0) {
 			g_st |= 0x400;
+#if MC_DIS
+			printf("Timeout: %d %llu %llu\n", pos, to, get_absolute_time());
+#endif
+			return 0;
+		}
+		if (!readable)
+			continue;
 		in = spi_get_hw(spi0)->dr;
 
 		buf[pos] = in;
