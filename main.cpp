@@ -28,6 +28,8 @@
 
 
 #define BUF_LEN 128
+#define MC_EN 0			// Enable multicore
+#define MC_DIS (!MC_EN)
 
 
 struct sysex_stream {
@@ -368,7 +370,10 @@ void core1_main()
 		stream_clear(&streams_ic1[i]);
 	}
 
-	while (1) {
+#if MC_EN
+	while (1)
+#endif
+	{
 		si = ic_stream_wrptr % IC_STREAMS;
 		ic0 = &streams_ic0[si];
 		ic1 = &streams_ic1[si];
@@ -435,7 +440,9 @@ int main()
 	tusb_init();
 
 	init_hw();
+#if MC_EN
 	multicore_launch_core1(core1_main);
+#endif
 
 	stream_clear(&s_usbtmp);
 	for (i = 0; i < IJ_STREAMS; i++) {
@@ -446,6 +453,9 @@ int main()
 	while (1) {
 		tud_task();
 		read_uart_cmd();
+#if (!MC_EN)
+		core1_main();
+#endif
 
 		/* Pull intercept streams (both streams are input, synchronized) and print */
 		stream_ready = ic_stream_wrptr != ic_stream_rdptr;
