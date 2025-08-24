@@ -32,6 +32,7 @@
 #define MC_EN 1			// Enable multicore
 #define MC_DIS (!MC_EN)
 
+#define PRINTBUF_MAX 64
 
 struct sysex_stream {
 	uint8_t buf[BUF_LEN];
@@ -62,12 +63,15 @@ uint8_t ijres_stream_rdptr = 0;
 
 const uint8_t g_buf0[1] = {0};
 
+uint8_t buf_status[47] = {0};
+
 bool do_echo = 1;
+bool do_filter_status = 1;
 
 
 void printbuf(uint8_t buf[], size_t len)
 {
-	const int bpl = 16;
+	const int bpl = 64;
 
 	int i;
 	for (i = 0; i < len; ++i) {
@@ -239,6 +243,10 @@ void read_uart_cmd()
 	} else if (c == 'E') {
 		do_echo = 0;
 		printf("Echo off\n");
+	} else if (c == 'F') {
+		do_filter_status = 0;
+	} else if (c == 'f') {
+		do_filter_status = 1;
 	} else if (c == 'S') {
 		/* Clear status */
 		g_st = 0;
@@ -510,6 +518,7 @@ void core1_main()
 
 int main()
 {
+	int filter;
 	int16_t i;
 	int16_t len;
 	int16_t ijres_tmp_pos = 0;
@@ -546,15 +555,32 @@ int main()
 
 			s = &streams_ic1[si];
 			if (do_echo & 1) {
-				printf("F2M %d: ", s->len);
-				printbuf(s->buf, s->len < 16 ? s->len : 16);
+				filter = 0;
+				if (s->len == 4 && s->buf[1] == 0x38 && s->buf[2] == 0x03 && do_filter_status) {
+					filter = 1;
+				}
+
+				if (!filter) {
+					printf("F2M %d: ", s->len);
+					printbuf(s->buf, s->len < PRINTBUF_MAX? s->len : PRINTBUF_MAX);
+				}
 			}
 			stream_clear(s);
 
 			s = &streams_ic0[si];
 			if (do_echo & 1) {
-				printf("M2F %d: ", s->len);
-				printbuf(s->buf, s->len < 16 ? s->len : 16);
+				filter = 0;
+				if (s->len == 47 && s->buf[1] == 0x39 && s->buf[2] == 0x03 && do_filter_status) {
+					if (memcmp(s->buf, buf_status, 47) == 0) {
+						filter = 1;
+					} else {
+						memcpy(buf_status, s->buf, 47);
+					}
+				}
+				if (!filter) {
+					printf("M2F %d: ", s->len);
+					printbuf(s->buf, s->len < PRINTBUF_MAX ? s->len : PRINTBUF_MAX);
+				}
 			}
 			stream_clear(s);
 
@@ -572,7 +598,7 @@ int main()
 				len = sysex_stream_check(s, s_usbtmp.buf[i]);
 				if (len > 0) {
 					if (do_echo & 1)
-						printf("USB Req %d\n", s->len);
+						printf("U2M %d\n", s->len);
 					__dmb();
 					ijreq_stream_wrptr++;
 				}
@@ -588,7 +614,7 @@ int main()
 			ijres_tmp_pos += len;
 			if (ijres_tmp_pos == s->len) {
 				if (do_echo & 1)
-					printf("USB Res %d\n", s->len);
+					printf("M2U %d\n", s->len);
 
 				stream_clear(s);
 				ijres_tmp_pos = 0;
