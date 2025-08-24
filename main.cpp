@@ -28,6 +28,7 @@
 
 
 #define BUF_LEN 128
+#define BR_DEBUG 1
 #define MC_EN 0			// Enable multicore
 #define MC_DIS (!MC_EN)
 
@@ -50,6 +51,7 @@ struct sysex_stream streams_ij_res[IJ_STREAMS];
 
 struct sysex_stream s_usbtmp;
 
+volatile uint16_t g_st = 0;
 uint8_t ic_stream_wrptr = 0;
 uint8_t ic_stream_rdptr = 0;
 uint8_t ijreq_stream_wrptr = 0;
@@ -235,6 +237,7 @@ void read_uart_cmd()
 	}
 }
 
+#if 0
 int16_t read_uart_request(struct sysex_stream *s)
 {
 	int16_t len = 0;
@@ -268,6 +271,7 @@ void send_uart_response(struct sysex_stream *s, uint16_t len)
 	}
 	fflush(stdout);
 }
+#endif
 #if 0
 int send_request(uint8_t *buf, uint16_t len)
 {
@@ -295,6 +299,7 @@ int read_response(uint8_t *buf)
 	while (len == 0) {
 		spi_get_hw(spi0)->dr = 0;
 		while (spi_is_readable(spi0) == 0);
+			g_st |= 0x400;
 		in = spi_get_hw(spi0)->dr;
 
 		buf[pos] = in;
@@ -329,6 +334,20 @@ int transceive_request(const uint8_t *req, int reqlen, uint8_t *resp)
 	gpio_put(P_IRQB, 0);
 
 	/* Need read too for FIFO cleanup */
+#if BR_DEBUG
+	u0 = 0;
+	for (len = 0; len < reqlen; len++) {
+		if (req[len] == 0xf0)
+			u0 |= 0x1;
+		if (req[len] == 0xf7)
+			u0 |= 0x2;
+	}
+	/* Error: no SOF/EOF in SysEx */
+	if (u0 & 1 == 0)
+		g_st |= 0x100;
+	if (u0 & 2 == 0)
+		g_st |= 0x200;
+#endif
 
 	while (spi_is_readable(spi0))
 		u0 = spi_get_hw(spi0)->dr;
