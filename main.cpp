@@ -29,7 +29,7 @@
 
 #define BUF_LEN 128
 #define BR_DEBUG 1
-#define MC_EN 0			// Enable multicore
+#define MC_EN 1			// Enable multicore
 #define MC_DIS (!MC_EN)
 
 
@@ -62,7 +62,7 @@ uint8_t ijres_stream_rdptr = 0;
 
 const uint8_t g_buf0[1] = {0};
 
-bool do_echo = 0;
+bool do_echo = 1;
 
 
 void printbuf(uint8_t buf[], size_t len)
@@ -315,6 +315,8 @@ int read_response(uint8_t *buf)
 		}
 		if (!readable)
 			continue;
+
+		gpio_put(P_IRQB, 1);
 		in = spi_get_hw(spi0)->dr;
 
 		buf[pos] = in;
@@ -326,6 +328,9 @@ int read_response(uint8_t *buf)
 			/* HOTFIX: skip null status byte */
 			if (pos == 1 && in == 0) {
 				g_st |= 0x400;
+#if MC_DIS
+				printf("-Q-");
+#endif
 				continue;
 			}
 
@@ -352,9 +357,18 @@ int transceive_request(const uint8_t *req, int reqlen, uint8_t *resp)
 	gpio_put(P_MUX_SEL_MISO0, 1);
 	gpio_put(P_MUX_SEL_NIRQ0, 1);
 
-	gpio_put(P_IRQB, 0);
+
+#if MC_DIS
+	printf("TR REQ %d", reqlen);
+	printbuf(req, reqlen);
+#endif
 
 	/* Need read too for FIFO cleanup */
+	while (spi_is_readable(spi0))
+		u0 = spi_get_hw(spi0)->dr;
+
+	gpio_put(P_IRQB, 0);
+
 #if BR_DEBUG
 	u0 = 0;
 	for (len = 0; len < reqlen; len++) {
@@ -381,6 +395,7 @@ int transceive_request(const uint8_t *req, int reqlen, uint8_t *resp)
 	while (len == 0) {
 		len = read_response(resp);
 	}
+	len = read_response(resp);
 
 	gpio_put(P_MUX_SEL_NSS1, 0);
 	gpio_put(P_MUX_SEL_MISO0, 0);
@@ -401,13 +416,21 @@ void core1_main()
 
 	struct sysex_stream *ic0, *ic1, *ij_req, *ij_res;
 
-	for (i = 0; i < 16; i++) {
-		u0 = spi_get_hw(spi0)->dr;
-		u1 = spi_get_hw(spi1)->dr;
-	}
-	for (i = 0; i < IC_STREAMS; i++) {
-		stream_clear(&streams_ic0[i]);
-		stream_clear(&streams_ic1[i]);
+	stream_ptrs *p = &ptrs;
+
+	static int c1_inited = 0;
+
+	if (c1_inited == 0) {
+		c1_inited = 1;
+
+		for (i = 0; i < 16; i++) {
+			u0 = spi_get_hw(spi0)->dr;
+			u1 = spi_get_hw(spi1)->dr;
+		}
+		for (i = 0; i < IC_STREAMS; i++) {
+			stream_clear(&streams_ic0[i]);
+			stream_clear(&streams_ic1[i]);
+		}
 	}
 
 #if MC_EN
@@ -421,9 +444,13 @@ void core1_main()
 		a0 = spi_is_readable(spi0);
 		a1 = spi_is_readable(spi1);
 		/* SPI are drived by the same CLK/nSS, thus should be synced */
-		if (a0 && a1) {
-			u0 = spi_get_hw(spi0)->dr;
-			u1 = spi_get_hw(spi1)->dr;
+		if (a0 || a1) {
+			if (a0) {
+				u0 = spi_get_hw(spi0)->dr;
+			}
+			if (a1) {
+				u1 = spi_get_hw(spi1)->dr;
+			}
 
 			stream_ready = ic_stream_wrptr - ic_stream_rdptr < IC_STREAMS;
 
