@@ -46,6 +46,8 @@
 #define ERR_NULL_STATUS         (1 << 3)
 #define ERR_BUF_OVERFLOW        (1 << 4)
 
+#define RET_ERR_BUF_OVERFLOW    (-32767)
+
 struct sysex_buffer {
 	uint8_t buf[BUF_LEN];
 	int16_t pos;
@@ -186,7 +188,6 @@ int16_t buf_append(struct sysex_buffer *s, uint8_t c)
 	if (c == 0xF0) {
 		s->buf[0] = c;
 		s->pos = 1;
-		return -s->pos;
 	} else if (s->pos > 0) {
 		s->buf[s->pos] = c;
 		s->pos++;
@@ -197,9 +198,7 @@ int16_t buf_append(struct sysex_buffer *s, uint8_t c)
 			return s->len;
 		} else if (s->pos >= BUF_LEN) {
 			s->pos = 0;
-			return -2;
-		} else {
-			return -s->pos;
+			return RET_ERR_BUF_OVERFLOW;
 		}
 	}
 	return 0;
@@ -249,21 +248,24 @@ void read_uart_cmd()
 	}
 }
 
-int read_response(uint8_t *buf)
+int read_response(struct sysex_buffer *resp)
 {
 	bool readable;
+	int16_t ret = 0;
 	uint16_t pos = 0;
 	uint16_t len = 0;
 	uint8_t in;
 
+	uint8_t *buf = resp->buf;
+
 	absolute_time_t to;
 	to = make_timeout_time_us(1000000);
 
-	while (len == 0) {
+	while (resp->len == 0) {
 		readable = spi_is_readable(spi0);
 		if (absolute_time_diff_us(to, get_absolute_time()) > 0) {
 			r_err |= ERR_RESP_TIMEOUT;
-			return 0;
+			return -1;
 		}
 		if (!readable)
 			continue;
@@ -272,46 +274,32 @@ int read_response(uint8_t *buf)
 
 		in = spi_get_hw(spi0)->dr;
 
-		buf[pos] = in;
-		if (pos == 0) {
-			if (in == 0xF0) {
-				pos++;
-			}
-		} else {
-			/* HOTFIX (maybe not needed): skip null status byte */
-			if (pos == 1 && in == 0) {
-				r_err |= ERR_NULL_STATUS;
-				continue;
-			}
-
-			if (pos < BUF_LEN-1) {
-				pos++;
-			} else {
-				r_err |= ERR_BUF_OVERFLOW;
-			}
-
-			if (in == 0xF7) {
-				len = pos;
-				pos = 0;
-			}
+		if (resp->pos == 1 && in == 0) {
+			r_err |= ERR_NULL_STATUS;
+			continue;
 		}
+		ret = buf_append(resp, in);
+		if (ret == RET_ERR_BUF_OVERFLOW)
+			r_err |= ERR_BUF_OVERFLOW;
 	}
-	return len;
+	return 0;
 }
 
-int transceive_request(const uint8_t *req, int16_t len, uint8_t *resp)
+int transceive_request(struct sysex_buffer *req, struct sysex_buffer *resp)
 {
 	int16_t i;
+	int16_t len = req->len;
+	uint8_t *buf = req->buf;
 	uint8_t u0;
 
 	/* Error: no SOF/EOF in SysEx */
-	if (req[0] != 0xF0)
+	if (buf[0] != 0xF0)
 		r_err |= ERR_NO_F0;
-	if (req[len-1] != 0xF7)
+	if (buf[len-1] != 0xF7)
 		r_err |= ERR_NO_F7;
 
-	if (req[0] != 0xF0 || req[len-1] != 0xF7)
-		return 0;
+	if (buf[0] != 0xF0 || buf[len-1] != 0xF7)
+		return -1;
 
 	gpio_put(P_MUX_SEL_NSS1, 1);
 	gpio_put(P_MUX_SEL_MISO0, 1);
@@ -325,7 +313,7 @@ int transceive_request(const uint8_t *req, int16_t len, uint8_t *resp)
 
 	for (i = 0; i < len; i++) {
 		while (spi_is_writable(spi0) == 0);
-		spi_get_hw(spi0)->dr = req[i];
+		spi_get_hw(spi0)->dr = buf[i];
 
 		while (spi_is_readable(spi0) == 0);
 		u0 = spi_get_hw(spi0)->dr;
@@ -334,12 +322,12 @@ int transceive_request(const uint8_t *req, int16_t len, uint8_t *resp)
 	/* INFO: Too early here: deassert in read_response */
 //	gpio_put(P_IRQB, 1);
 
-	len = read_response(resp);
+	i = read_response(resp);
 
 	gpio_put(P_MUX_SEL_NSS1, 0);
 	gpio_put(P_MUX_SEL_MISO0, 0);
 	gpio_put(P_MUX_SEL_NIRQ0, 0);
-	return len;
+	return i;
 }
 
 void core1_main()
@@ -396,7 +384,7 @@ void core1_main()
 				/* Paranoia */
 				gpio_put(P_MUX_SEL_NIRQ0, 1);
 				if (gpio_get(P_IRQ1) == 1) {
-					ijres->len = transceive_request(ijreq->buf, ijreq->len, ijres->buf);
+					transceive_request(ijreq, ijres);
 
 					buf_clear(ijreq);
 
