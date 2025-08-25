@@ -354,12 +354,18 @@ void core1_main()
 		a0 = spi_is_readable(spi0);
 		a1 = spi_is_readable(spi1);
 		/* SPI are drived by the same CLK/nSS, thus should be synced */
-		if (a0 && a1) {
-			u0 = spi_get_hw(spi0)->dr;
-			u1 = spi_get_hw(spi1)->dr;
-
+		if (a0 || a1) {
 			buf_rdy = ptr_ic_wr - ptr_ic_rd < BUFS_IC;
 			if (buf_rdy) {
+				if (a0) {
+					u0 = spi_get_hw(spi0)->dr;
+					buf_append(ic0, u0);
+				}
+				if (a1) {
+					u1 = spi_get_hw(spi1)->dr;
+					buf_append(ic1, u1);
+				}
+
 				buf_append(ic0, u0);
 				buf_append(ic1, u1);
 
