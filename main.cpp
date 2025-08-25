@@ -35,10 +35,10 @@
 #define BUF_STATUS_LEN 47
 
 #define BR_DEBUG 1
-#define MC_EN 1			// Enable multicore
+#define MC_EN 1                 // Enable multicore
 
-#define PRINTBUF_MAX 64		// Maximum length of printed buffer (crop)
-#define PRINTBUF_BPL 64		// Bytes per line
+#define PRINTBUF_MAX 64         // Maximum length of printed buffer (crop)
+#define PRINTBUF_BPL 64         // Bytes per line
 
 #define ERR_NO_F0               (1 << 0)
 #define ERR_NO_F7               (1 << 1)
@@ -74,8 +74,8 @@ uint8_t buf_status[BUF_STATUS_LEN] = {0};
 
 bool do_echo_fw = false;
 bool do_echo_usb = false;
-bool do_filter_status = true;
-bool do_filter_request = false;		// filter out the request message
+bool do_filter_status = true;           // filter out the request / response status message
+bool do_filter_request = false;         // filter out the request message
 
 volatile uint16_t r_err = 0;
 
@@ -366,6 +366,8 @@ void core1_main()
 #endif
 					ptr_ic_wr++;
 				}
+			} else {
+				r_err |= ERR_IC_BUF_NOTREADY;
 			}
 		}
 		if (a0 || a1)
@@ -443,7 +445,7 @@ int main()
 			si = ptr_ic_rd % BUFS_IC;
 
 			s = &buf_ic1[si];
-			if (do_echo_fw && do_filter_request == 0) {
+			if (do_echo_fw && !do_filter_request) {
 				filter = 0;
 				if (s->len == 4 && s->buf[1] == 0x38 && s->buf[2] == 0x03 && do_filter_status) {
 					filter = 1;
