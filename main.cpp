@@ -53,6 +53,8 @@
 
 #define RET_ERR_BUF_OVERFLOW    (-32767)
 #define RET_ERR_BUF_FULL        (-32766)
+#define RET_ERR_TIMEOUT         (-32765)
+#define RET_ERR_FORMAT          (-32764)
 
 struct sysex_buffer {
 	uint8_t buf[BUF_LEN];
@@ -297,18 +299,18 @@ int read_response(struct sysex_buffer *resp)
 	to = make_timeout_time_us(1000000);
 
 	while (resp->len == 0) {
-		readable = spi_is_readable(spi0);
 		if (absolute_time_diff_us(to, get_absolute_time()) > 0) {
 			r_err |= ERR_RESP_TIMEOUT;
 			return -1;
 		}
-		if (!readable)
+		if (!spi_is_readable(spi0) || !spi_is_readable(spi1))
 			continue;
 
-		gpio_put(P_IRQB, 1);
-
+		in = spi_get_hw(spi1)->dr;
 		in = spi_get_hw(spi0)->dr;
 
+		if (resp->pos > 0)
+			gpio_put(P_IRQB, 1);
 		if (resp->pos == 1 && in == 0) {
 			r_err |= ERR_NULL_STATUS;
 			continue;
@@ -327,6 +329,8 @@ int transceive_request(struct sysex_buffer *req, struct sysex_buffer *resp)
 	uint8_t *buf = req->buf;
 	uint8_t u0;
 
+	absolute_time_t to;
+
 	/* Error: no SOF/EOF in SysEx */
 	if (buf[0] != 0xF0)
 		r_err |= ERR_NO_F0;
@@ -334,30 +338,48 @@ int transceive_request(struct sysex_buffer *req, struct sysex_buffer *resp)
 		r_err |= ERR_NO_F7;
 
 	if (buf[0] != 0xF0 || buf[len-1] != 0xF7)
-		return -1;
+		return RET_ERR_FORMAT;
 
 	gpio_put(P_MUX_SEL_NSS1, 1);
 	gpio_put(P_MUX_SEL_MISO0, 1);
 	gpio_put(P_MUX_SEL_NIRQ0, 1);
 
 	/* Need read too for FIFO cleanup */
+	while (spi_is_readable(spi1))
+		u0 = spi_get_hw(spi1)->dr;
 	while (spi_is_readable(spi0))
 		u0 = spi_get_hw(spi0)->dr;
 
 	gpio_put(P_IRQB, 0);
 
+	to = make_timeout_time_us(100000);
+	while (spi_is_readable(spi0) == 0 && spi_is_readable(spi1) == 0) {
+		if (absolute_time_diff_us(to, get_absolute_time()) > 0) {
+			i = RET_ERR_TIMEOUT;
+			goto err;
+		}
+	}
+
 	for (i = 0; i < len; i++) {
 		while (spi_is_writable(spi0) == 0);
 		spi_get_hw(spi0)->dr = buf[i];
 
-		while (spi_is_readable(spi0) == 0);
+		while (spi_is_readable(spi0) == 0 && spi_is_readable(spi1) == 0) {
+			if (absolute_time_diff_us(to, get_absolute_time()) > 0) {
+				i = RET_ERR_TIMEOUT;
+				goto err;
+			}
+		}
 		u0 = spi_get_hw(spi0)->dr;
+		u0 = spi_get_hw(spi1)->dr;
 	}
 
 	/* INFO: Too early here: deassert in read_response */
 //	gpio_put(P_IRQB, 1);
 
 	i = read_response(resp);
+err:
+	gpio_put(P_IRQB, 1);
 
 	gpio_put(P_MUX_SEL_NSS1, 0);
 	gpio_put(P_MUX_SEL_MISO0, 0);
@@ -378,6 +400,8 @@ void core1_main()
 	bool buf_rdy;
 
 	struct sysex_buffer *ic0, *ic1, *ijreq, *ijres;
+
+	absolute_time_t to;
 
 	do {
 		si = ptr_ic_wr % BUFS_IC;
@@ -455,7 +479,19 @@ void core1_main()
 				/* Paranoia */
 				gpio_put(P_MUX_SEL_NIRQ0, 1);
 				if (gpio_get(P_IRQ1) == 1) {
-					transceive_request(ijreq, ijres);
+					do {
+						i = transceive_request(ijreq, ijres);
+						if (i == RET_ERR_FORMAT) {
+							break;
+						} else if (i == RET_ERR_TIMEOUT) {
+							to = make_timeout_time_us(300000);
+							while(1) {
+								if (absolute_time_diff_us(to, get_absolute_time()) > 0) {
+									break;
+								}
+							}
+						}
+					} while (i != 0);
 
 					buf_clear(ijreq);
 
