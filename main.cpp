@@ -80,6 +80,7 @@ bool do_echo_fw = false;
 bool do_echo_usb = false;
 bool do_filter_status = true;           // filter out the request / response status message
 bool do_filter_request = false;         // filter out the request message
+bool do_route_ic_usb = false;           // route interception from Master to USB-MIDI
 
 volatile uint16_t r_err = 0;
 
@@ -236,6 +237,7 @@ void read_uart_cmd()
 				"u/U: enable/disable logging of USB-MIDI messages (shortlog)\n"
 				"q/Q: enable/disable filtering out all request messages\n"
 				"s/S: enable/disable filtering out status reqest/response messages\n"
+				"i/I: enable/disable routing intercepted messages to USB-MIDI\n"
 				"c/C: print/clear status and error registers\n"
 		);
 	} else if (c == 'f') {
@@ -258,6 +260,10 @@ void read_uart_cmd()
 		do_filter_request = false;
 	} else if (c == 'q') {
 		do_filter_request = true;
+	} else if (c == 'i') {
+		do_route_ic_usb = true;
+	} else if (c == 'I') {
+		do_route_ic_usb = false;
 	} else if (c == 'C') {
 		r_err = 0;
 	} else if (c == 'c') {
@@ -359,6 +365,7 @@ void core1_main()
 	uint8_t a1;
 
 	uint8_t si;
+	uint8_t ijres_inc;
 	bool buf_rdy;
 
 	struct sysex_buffer *ic0, *ic1, *ijreq, *ijres;
@@ -384,10 +391,40 @@ void core1_main()
 				}
 
 				if (buf_full(ic0)) {
+					ijres_inc = 0;
+
+					if (do_route_ic_usb) {
+						if (!do_filter_request) {
+							si = ptr_ijres_wr % BUFS_IJRES;
+							ijres = &buf_ijres[si];
+
+							buf_rdy = ptr_ijres_wr - ptr_ijres_rd < BUFS_IJRES;
+							if (buf_rdy) {
+								memcpy(ijres->buf, ic1->buf, ic1->len);
+								ijres->len = ic1->len;
+								ijres_inc++;
+							} else {
+								r_err |= ERR_IJRES_BUF_NOTREADY;
+							}
+						}
+
+						si = (ptr_ijres_wr + ijres_inc) % BUFS_IJRES;
+						ijres = &buf_ijres[si];
+
+						buf_rdy = (ptr_ijres_wr + ijres_inc) - ptr_ijres_rd < BUFS_IJRES;
+						if (buf_rdy) {
+							memcpy(ijres->buf, ic0->buf, ic0->len);
+							ijres->len = ic0->len;
+							ijres_inc++;
+						} else {
+							r_err |= ERR_IJRES_BUF_NOTREADY;
+						}
+					}
 #if MC_EN
 					__dmb();
 #endif
 					ptr_ic_wr++;
+					ptr_ijres_wr += ijres_inc;
 				}
 			} else {
 				r_err |= ERR_IC_BUF_NOTREADY;
