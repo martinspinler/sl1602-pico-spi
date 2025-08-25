@@ -58,6 +58,8 @@ struct sysex_buffer {
 	uint8_t buf[BUF_LEN];
 	int16_t pos;
 	int16_t len;
+	int16_t invalid_pre;
+	int16_t invalid_post;
 };
 
 
@@ -178,6 +180,8 @@ void buf_clear(struct sysex_buffer *s)
 {
 	s->pos = 0;
 	s->len = 0;
+	s->invalid_pre = 0;
+	s->invalid_post = 0;
 }
 
 bool buf_cleared(struct sysex_buffer *s)
@@ -193,6 +197,7 @@ bool buf_full(struct sysex_buffer *s)
 int16_t buf_append(struct sysex_buffer *s, uint8_t c)
 {
 	if (s->len) {
+		s->invalid_post++;
 		return RET_ERR_BUF_FULL;
 	}
 
@@ -211,6 +216,8 @@ int16_t buf_append(struct sysex_buffer *s, uint8_t c)
 			s->pos = 0;
 			return RET_ERR_BUF_OVERFLOW;
 		}
+	} else {
+		s->invalid_pre++;
 	}
 	return 0;
 }
@@ -516,7 +523,7 @@ int main()
 				}
 
 				if (!filter) {
-					printf("F2M %d: ", s->len);
+					printf("F2M %d, %d/%d :", s->len, s->invalid_pre, s->invalid_post);
 					printbuf(s->buf, s->len < PRINTBUF_MAX? s->len : PRINTBUF_MAX);
 				}
 			}
@@ -533,7 +540,7 @@ int main()
 					}
 				}
 				if (!filter) {
-					printf("M2F %d: ", s->len);
+					printf("M2F %d, %d/%d: ", s->len, s->invalid_pre, s->invalid_post);
 					printbuf(s->buf, s->len < PRINTBUF_MAX ? s->len : PRINTBUF_MAX);
 				}
 			}
@@ -553,7 +560,7 @@ int main()
 				len = buf_append(s, buf_tmp_usb.buf[i]);
 				if (len > 0) {
 					if (do_echo_usb)
-						printf("U2M %d\n", s->len);
+						printf("U2M %d, %d/%d\n", s->len, s->invalid_pre, s->invalid_post);
 					__dmb();
 					ptr_ijreq_wr++;
 					/* FIXME: remainder is discarded */
@@ -571,7 +578,7 @@ int main()
 			ijres_tmp_pos += len;
 			if (ijres_tmp_pos == s->len) {
 				if (do_echo_usb)
-					printf("M2U %d\n", s->len);
+					printf("M2U %d, %d/%d\n", s->len, s->invalid_pre, s->invalid_post);
 
 				buf_clear(s);
 				ijres_tmp_pos = 0;
