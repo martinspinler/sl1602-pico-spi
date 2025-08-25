@@ -29,7 +29,8 @@
 #define P_MUX_SEL_NSS1  26
 
 #define BUFS_IC 2    // Interception buffer count
-#define BUFS_IJ 1    // Inject buffer count
+#define BUFS_IJREQ 1 // Inject request buffer count
+#define BUFS_IJRES 4 // Inject response buffer count
 
 #define BUF_LEN 128
 #define BUF_STATUS_LEN 47
@@ -45,6 +46,8 @@
 #define ERR_RESP_TIMEOUT        (1 << 2)
 #define ERR_NULL_STATUS         (1 << 3)
 #define ERR_BUF_OVERFLOW        (1 << 4)
+#define ERR_IC_BUF_NOTREADY     (1 << 5)
+#define ERR_IJRES_BUF_NOTREADY  (1 << 6)
 
 #define RET_ERR_BUF_OVERFLOW    (-32767)
 
@@ -57,8 +60,8 @@ struct sysex_buffer {
 
 struct sysex_buffer buf_ic0[BUFS_IC];
 struct sysex_buffer buf_ic1[BUFS_IC];
-struct sysex_buffer buf_ijreq[BUFS_IJ];
-struct sysex_buffer buf_ijres[BUFS_IJ];
+struct sysex_buffer buf_ijreq[BUFS_IJREQ];
+struct sysex_buffer buf_ijres[BUFS_IJRES];
 struct sysex_buffer buf_tmp_usb;
 
 uint8_t ptr_ic_wr = 0;
@@ -376,10 +379,10 @@ void core1_main()
 		if (buf_cleared(ic0) && buf_cleared(ic1)) {
 			buf_rdy = ptr_ijreq_wr != ptr_ijreq_rd;
 
-			si = ptr_ijreq_rd % BUFS_IJ;
+			si = ptr_ijreq_rd % BUFS_IJREQ;
 			ijreq = &buf_ijreq[si];
 
-			si = ptr_ijres_wr % BUFS_IJ;
+			si = ptr_ijres_wr % BUFS_IJRES;
 			ijres = &buf_ijres[si];
 
 			if (buf_rdy /*&& buf_full(ijreq)*/ && gpio_get(P_IRQ1) == 1) {
@@ -418,8 +421,10 @@ int main()
 	init_hw();
 
 	buf_clear(&buf_tmp_usb);
-	for (i = 0; i < BUFS_IJ; i++) {
+	for (i = 0; i < BUFS_IJREQ; i++) {
 		buf_clear(&buf_ijreq[i]);
+	}
+	for (i = 0; i < BUFS_IJRES; i++) {
 		buf_clear(&buf_ijres[i]);
 	}
 	for (i = 0; i < BUFS_IC; i++) {
@@ -480,9 +485,9 @@ int main()
 		}
 
 		/* Push inject stream readen from USB-MIDI */
-		buf_rdy = ptr_ijreq_wr - ptr_ijreq_rd < BUFS_IJ;
+		buf_rdy = ptr_ijreq_wr - ptr_ijreq_rd < BUFS_IJREQ;
 		if (buf_rdy) {
-			si = ptr_ijreq_wr % BUFS_IJ;
+			si = ptr_ijreq_wr % BUFS_IJREQ;
 			s = &buf_ijreq[si];
 			buf_tmp_usb.len = tud_midi_n_stream_read(0, 0, buf_tmp_usb.buf, BUF_LEN);
 			for (i = 0; i < buf_tmp_usb.len; i++) {
@@ -501,7 +506,7 @@ int main()
 		/* Pull inject stream and write to USB-MIDI */
 		buf_rdy = ptr_ijres_wr != ptr_ijres_rd;
 		if (buf_rdy) {
-			si = ptr_ijres_rd % BUFS_IJ;
+			si = ptr_ijres_rd % BUFS_IJRES;
 			s = &buf_ijres[si];
 			len = tud_midi_n_stream_write(0, 0, s->buf + ijres_tmp_pos, s->len - ijres_tmp_pos);
 			ijres_tmp_pos += len;
