@@ -12,10 +12,12 @@
 #include "bsp/board_api.h"
 #include "tusb.h"
 
-/* TODO: Enable injecting request after DSPB init.
+/* FIXME: Enable injecting request after DSPB init.
  * DSPB init can be recognized by request from the FW chip,
  * but better is to use a timeout (when Pico reboots by software request
  * on the fly, there is no such further request from FW chip.)
+ *
+ * FIXME: When running osclive, the Recall button stuck everything until Pico reboot
  */
 
 #define P_IRQ1  12 // Input from DSPB
