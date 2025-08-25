@@ -219,7 +219,7 @@ void read_uart_cmd()
 				"Help\n"
 				"f/F: enable/disable logging of FireWire messages\n"
 				"u/U: enable/disable logging of USB-MIDI messages (shortlog)\n"
-				"s/s: enable/disable filtering out status messages (shortlog)\n"
+				"s/S: enable/disable filtering out status messages (shortlog)\n"
 				"q/Q: enable/disable filtering out status messages (shortlog)\n"
 				"c/C: print/clear status and error registers\n"
 		);
