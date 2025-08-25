@@ -12,6 +12,11 @@
 #include "bsp/board_api.h"
 #include "tusb.h"
 
+/* TODO: Enable injecting request after DSPB init.
+ * DSPB init can be recognized by request from the FW chip,
+ * but better is to use a timeout (when Pico reboots by software request
+ * on the fly, there is no such further request from FW chip.)
+ */
 
 #define P_IRQ1  12 // Input from DSPB
 #define P_IRQB  13 // Output to CPB
@@ -23,50 +28,54 @@
 #define P_MUX_SEL_MISO0 22
 #define P_MUX_SEL_NSS1  26
 
-#define IC_STREAMS 2    // Interception streams
-#define IJ_STREAMS 1    // Inject streams
+#define BUFS_IC 2    // Interception buffer count
+#define BUFS_IJ 1    // Inject buffer count
 
 #define BUF_LEN 128
 #define BUF_STATUS_LEN 47
 
 #define BR_DEBUG 1
 #define MC_EN 1			// Enable multicore
-#define MC_DIS (!MC_EN)
 
-#define PRINTBUF_MAX 64
-#define PRINTBUF_BPL 64
+#define PRINTBUF_MAX 64		// Maximum length of printed buffer (crop)
+#define PRINTBUF_BPL 64		// Bytes per line
 
-struct sysex_stream {
+#define ERR_NO_F0               (1 << 0)
+#define ERR_NO_F7               (1 << 1)
+#define ERR_RESP_TIMEOUT        (1 << 2)
+#define ERR_NULL_STATUS         (1 << 3)
+#define ERR_BUF_OVERFLOW        (1 << 4)
+
+struct sysex_buffer {
 	uint8_t buf[BUF_LEN];
 	int16_t pos;
 	int16_t len;
-	uint8_t in;
 };
 
 
-struct sysex_stream streams_ic0[IC_STREAMS];
-struct sysex_stream streams_ic1[IC_STREAMS];
-struct sysex_stream streams_ij_req[IJ_STREAMS];
-struct sysex_stream streams_ij_res[IJ_STREAMS];
+struct sysex_buffer buf_ic0[BUFS_IC];
+struct sysex_buffer buf_ic1[BUFS_IC];
+struct sysex_buffer buf_ijreq[BUFS_IJ];
+struct sysex_buffer buf_ijres[BUFS_IJ];
+struct sysex_buffer buf_tmp_usb;
 
-struct sysex_stream s_usbtmp;
+uint8_t ptr_ic_wr = 0;
+uint8_t ptr_ic_rd = 0;
+uint8_t ptr_ijreq_wr = 0;
+uint8_t ptr_ijreq_rd = 0;
+uint8_t ptr_ijres_wr = 0;
+uint8_t ptr_ijres_rd = 0;
 
-volatile uint16_t g_st = 0;
-uint8_t ic_stream_wrptr = 0;
-uint8_t ic_stream_rdptr = 0;
-uint8_t ijreq_stream_wrptr = 0;
-uint8_t ijreq_stream_rdptr = 0;
-uint8_t ijres_stream_wrptr = 0;
-uint8_t ijres_stream_rdptr = 0;
-
-
-const uint8_t g_buf0[1] = {0};
 
 uint8_t buf_status[BUF_STATUS_LEN] = {0};
 
-bool do_echo = 0;
-bool do_filter_status = 1;
-bool do_filter_request = 0;
+
+bool do_echo_fw = false;
+bool do_echo_usb = false;
+bool do_filter_status = true;
+bool do_filter_request = false;		// filter out the request message
+
+volatile uint16_t r_err = 0;
 
 
 void printbuf(uint8_t buf[], size_t len)
@@ -156,35 +165,33 @@ int init_hw()
 	return 0;
 }
 
-void stream_clear(struct sysex_stream *s)
+void buf_clear(struct sysex_buffer *s)
 {
 	s->pos = 0;
 	s->len = 0;
 }
 
-bool stream_cleared(struct sysex_stream *s)
+bool buf_cleared(struct sysex_buffer *s)
 {
 	return s->pos == 0;
 }
 
-bool stream_full(struct sysex_stream *s)
+bool buf_full(struct sysex_buffer *s)
 {
 	return s->len != 0;
 }
 
-int16_t sysex_stream_check(struct sysex_stream *s, uint8_t c)
+int16_t buf_append(struct sysex_buffer *s, uint8_t c)
 {
-	s->in = c;
-
-	if (s->in == 0xF0) {
-		s->buf[0] = s->in;
+	if (c == 0xF0) {
+		s->buf[0] = c;
 		s->pos = 1;
 		return -s->pos;
 	} else if (s->pos > 0) {
-		s->buf[s->pos] = s->in;
+		s->buf[s->pos] = c;
 		s->pos++;
 
-		if (s->in == 0xF7) {
+		if (c == 0xF7) {
 			s->len = s->pos;
 			s->pos = 0;
 			return s->len;
@@ -204,25 +211,40 @@ void read_uart_cmd()
 
 	c = stdio_getchar_timeout_us(0);
 
-	if (c == 'e') {
-		do_echo = 1;
-		printf("Echo on\n");
-	} else if (c == 'E') {
-		do_echo = 0;
-		printf("Echo off\n");
-	} else if (c == 'F') {
-		do_filter_status = 0;
+	if (c == 'h' || c == '?') {
+		printf(
+				"StudioLive 16.0.2 SPI-USB control bridge\n"
+				"Help\n"
+				"f/F: enable/disable logging of FireWire messages\n"
+				"u/U: enable/disable logging of USB-MIDI messages (shortlog)\n"
+				"s/s: enable/disable filtering out status messages (shortlog)\n"
+				"q/Q: enable/disable filtering out status messages (shortlog)\n"
+				"c/C: print/clear status and error registers\n"
+		);
 	} else if (c == 'f') {
-		do_filter_status = 1;
-	} else if (c == 'Q') {
-		do_filter_request = 0;
-	} else if (c == 'q') {
-		do_filter_request = 1;
+		do_echo_fw = true;
+		printf("Echo FireWire on\n");
+	} else if (c == 'F') {
+		do_echo_fw = false;
+		printf("Echo FireWire off\n");
+	} else if (c == 'u') {
+		do_echo_usb = true;
+		printf("Echo USB on\n");
+	} else if (c == 'U') {
+		do_echo_usb = false;
+		printf("Echo USB off\n");
 	} else if (c == 'S') {
-		/* Clear status */
-		g_st = 0;
+		do_filter_status = false;
 	} else if (c == 's') {
-		printf("Status: St: %04x", g_st);
+		do_filter_status = true;
+	} else if (c == 'Q') {
+		do_filter_request = false;
+	} else if (c == 'q') {
+		do_filter_request = true;
+	} else if (c == 'C') {
+		r_err = 0;
+	} else if (c == 'c') {
+		printf("Errors: %04x", r_err);
 		printf("\n");
 	}
 }
@@ -234,18 +256,20 @@ int read_response(uint8_t *buf)
 	uint16_t len = 0;
 	uint8_t in;
 
-	static absolute_time_t to;
+	absolute_time_t to;
 	to = make_timeout_time_us(1000000);
+
 	while (len == 0) {
 		readable = spi_is_readable(spi0);
 		if (absolute_time_diff_us(to, get_absolute_time()) > 0) {
-			g_st |= 0x400;
+			r_err |= ERR_RESP_TIMEOUT;
 			return 0;
 		}
 		if (!readable)
 			continue;
 
 		gpio_put(P_IRQB, 1);
+
 		in = spi_get_hw(spi0)->dr;
 
 		buf[pos] = in;
@@ -256,14 +280,14 @@ int read_response(uint8_t *buf)
 		} else {
 			/* HOTFIX (maybe not needed): skip null status byte */
 			if (pos == 1 && in == 0) {
-				g_st |= 0x400;
+				r_err |= ERR_NULL_STATUS;
 				continue;
 			}
 
 			if (pos < BUF_LEN-1) {
 				pos++;
 			} else {
-				g_st |= 0x800;
+				r_err |= ERR_BUF_OVERFLOW;
 			}
 
 			if (in == 0xF7) {
@@ -275,26 +299,19 @@ int read_response(uint8_t *buf)
 	return len;
 }
 
-int transceive_request(const uint8_t *req, int16_t reqlen, uint8_t *resp)
+int transceive_request(const uint8_t *req, int16_t len, uint8_t *resp)
 {
-	int16_t len;
+	int16_t i;
 	uint8_t u0;
 
-	u0 = 0;
-	for (len = 0; len < reqlen; len++) {
-		if (req[len] == 0xf0)
-			u0 |= 0x1;
-		if (req[len] == 0xf7)
-			u0 |= 0x2;
-	}
 	/* Error: no SOF/EOF in SysEx */
-	if (u0) {
-		if (u0 & 1 == 0)
-			g_st |= 0x100;
-		if (u0 & 2 == 0)
-			g_st |= 0x200;
+	if (req[0] != 0xF0)
+		r_err |= ERR_NO_F0;
+	if (req[len-1] != 0xF7)
+		r_err |= ERR_NO_F7;
+
+	if (req[0] != 0xF0 || req[len-1] != 0xF7)
 		return 0;
-	}
 
 	gpio_put(P_MUX_SEL_NSS1, 1);
 	gpio_put(P_MUX_SEL_MISO0, 1);
@@ -306,9 +323,9 @@ int transceive_request(const uint8_t *req, int16_t reqlen, uint8_t *resp)
 
 	gpio_put(P_IRQB, 0);
 
-	for (len = 0; len < reqlen; len++) {
+	for (i = 0; i < len; i++) {
 		while (spi_is_writable(spi0) == 0);
-		spi_get_hw(spi0)->dr = req[len];
+		spi_get_hw(spi0)->dr = req[i];
 
 		while (spi_is_readable(spi0) == 0);
 		u0 = spi_get_hw(spi0)->dr;
@@ -328,93 +345,70 @@ int transceive_request(const uint8_t *req, int16_t reqlen, uint8_t *resp)
 void core1_main()
 {
 	int i;
-	uint8_t u0 = 0;
-	uint8_t u1 = 0;
-	uint8_t a0 = 0;
-	uint8_t a1 = 0;
+	uint8_t u0;
+	uint8_t u1;
+	uint8_t a0;
+	uint8_t a1;
 
 	uint8_t si;
-	bool stream_ready;
+	bool buf_rdy;
 
-	struct sysex_stream *ic0, *ic1, *ij_req, *ij_res;
+	struct sysex_buffer *ic0, *ic1, *ijreq, *ijres;
 
-
-	static int c1_inited = 0;
-
-	if (c1_inited == 0) {
-		c1_inited = 1;
-
-		for (i = 0; i < 16; i++) {
-			u0 = spi_get_hw(spi0)->dr;
-			u1 = spi_get_hw(spi1)->dr;
-		}
-		for (i = 0; i < IC_STREAMS; i++) {
-			stream_clear(&streams_ic0[i]);
-			stream_clear(&streams_ic1[i]);
-		}
-	}
-
-#if MC_EN
-	while (1)
-#endif
-	{
-		si = ic_stream_wrptr % IC_STREAMS;
-		ic0 = &streams_ic0[si];
-		ic1 = &streams_ic1[si];
+	do {
+		si = ptr_ic_wr % BUFS_IC;
+		ic0 = &buf_ic0[si];
+		ic1 = &buf_ic1[si];
 
 		a0 = spi_is_readable(spi0);
 		a1 = spi_is_readable(spi1);
-		u0 = 0xFE;
-		u1 = 0xFE;
 		/* SPI are drived by the same CLK/nSS, thus should be synced */
 		if (a0 && a1) {
-			if (a0) {
-				u0 = spi_get_hw(spi0)->dr;
-			}
-			if (a1) {
-				u1 = spi_get_hw(spi1)->dr;
-			}
+			u0 = spi_get_hw(spi0)->dr;
+			u1 = spi_get_hw(spi1)->dr;
 
-			stream_ready = ic_stream_wrptr - ic_stream_rdptr < IC_STREAMS;
+			buf_rdy = ptr_ic_wr - ptr_ic_rd < BUFS_IC;
+			if (buf_rdy) {
+				buf_append(ic0, u0);
+				buf_append(ic1, u1);
 
-			if (stream_ready) {
-				sysex_stream_check(ic0, u0);
-				sysex_stream_check(ic1, u1);
-
-				if (stream_full(ic0)) {
+				if (buf_full(ic0)) {
+#if MC_EN
 					__dmb();
-					ic_stream_wrptr++;
+#endif
+					ptr_ic_wr++;
 				}
 			}
 		}
+		if (a0 || a1)
+			continue;
 
-		/* TODO: Enable injecting request after DSPB init! */
-		if (stream_cleared(ic0) && stream_cleared(ic1)) {
-			stream_ready = ijreq_stream_wrptr != ijreq_stream_rdptr;
+		if (buf_cleared(ic0) && buf_cleared(ic1)) {
+			buf_rdy = ptr_ijreq_wr != ptr_ijreq_rd;
 
-			si = ijreq_stream_rdptr % IJ_STREAMS;
-			ij_req = &streams_ij_req[si];
+			si = ptr_ijreq_rd % BUFS_IJ;
+			ijreq = &buf_ijreq[si];
 
-			si = ijres_stream_wrptr % IJ_STREAMS;
-			ij_res = &streams_ij_res[si];
+			si = ptr_ijres_wr % BUFS_IJ;
+			ijres = &buf_ijres[si];
 
-			if (stream_ready /*&& stream_full(ij_req)*/ && gpio_get(P_IRQ1) == 1) {
+			if (buf_rdy /*&& buf_full(ijreq)*/ && gpio_get(P_IRQ1) == 1) {
 				/* Paranoia */
 				gpio_put(P_MUX_SEL_NIRQ0, 1);
 				if (gpio_get(P_IRQ1) == 1) {
-					ij_res->len = transceive_request(ij_req->buf, ij_req->len, ij_res->buf);
+					ijres->len = transceive_request(ijreq->buf, ijreq->len, ijres->buf);
 
-					stream_clear(ij_req);
+					buf_clear(ijreq);
 
 					__dmb();
-					ijres_stream_wrptr++;
-					ijreq_stream_rdptr++;
+					ptr_ijres_wr++;
+					ptr_ijreq_rd++;
 				} else {
 					gpio_put(P_MUX_SEL_NIRQ0, 0);
 				}
 			}
 		}
-	}
+	} while (MC_EN);
 }
 
 int main()
@@ -424,23 +418,29 @@ int main()
 	int16_t len;
 	int16_t ijres_tmp_pos = 0;
 	uint8_t si;
-	bool stream_ready;
+	bool buf_rdy;
 
-	struct sysex_stream *s;
+	struct sysex_buffer *s;
 
 	board_init();
 	tusb_init();
 
 	init_hw();
+
+	buf_clear(&buf_tmp_usb);
+	for (i = 0; i < BUFS_IJ; i++) {
+		buf_clear(&buf_ijreq[i]);
+		buf_clear(&buf_ijres[i]);
+	}
+	for (i = 0; i < BUFS_IC; i++) {
+		buf_clear(&buf_ic0[i]);
+		buf_clear(&buf_ic1[i]);
+	}
+	__dmb();
+
 #if MC_EN
 	multicore_launch_core1(core1_main);
 #endif
-
-	stream_clear(&s_usbtmp);
-	for (i = 0; i < IJ_STREAMS; i++) {
-		stream_clear(&streams_ij_req[i]);
-		stream_clear(&streams_ij_res[i]);
-	}
 
 	while (1) {
 		tud_task();
@@ -450,12 +450,12 @@ int main()
 #endif
 
 		/* Pull intercept streams (both streams are input, synchronized) and print */
-		stream_ready = ic_stream_wrptr != ic_stream_rdptr;
-		if (stream_ready) {
-			si = ic_stream_rdptr % IC_STREAMS;
+		buf_rdy = ptr_ic_wr != ptr_ic_rd;
+		if (buf_rdy) {
+			si = ptr_ic_rd % BUFS_IC;
 
-			s = &streams_ic1[si];
-			if (do_echo & 1 && do_filter_request == 0) {
+			s = &buf_ic1[si];
+			if (do_echo_fw && do_filter_request == 0) {
 				filter = 0;
 				if (s->len == 4 && s->buf[1] == 0x38 && s->buf[2] == 0x03 && do_filter_status) {
 					filter = 1;
@@ -466,10 +466,10 @@ int main()
 					printbuf(s->buf, s->len < PRINTBUF_MAX? s->len : PRINTBUF_MAX);
 				}
 			}
-			stream_clear(s);
+			buf_clear(s);
 
-			s = &streams_ic0[si];
-			if (do_echo & 1) {
+			s = &buf_ic0[si];
+			if (do_echo_fw) {
 				filter = 0;
 				if (s->len == BUF_STATUS_LEN && s->buf[1] == 0x39 && s->buf[2] == 0x03 && do_filter_status) {
 					if (memcmp(s->buf, buf_status, BUF_STATUS_LEN) == 0) {
@@ -483,44 +483,46 @@ int main()
 					printbuf(s->buf, s->len < PRINTBUF_MAX ? s->len : PRINTBUF_MAX);
 				}
 			}
-			stream_clear(s);
+			buf_clear(s);
 
 			__dmb();
-			ic_stream_rdptr++;
+			ptr_ic_rd++;
 		}
 
-		/* Push inject stream readen from UART/USB-CDC */
-		stream_ready = ijreq_stream_wrptr - ijreq_stream_rdptr < IJ_STREAMS;
-		if (stream_ready) {
-			si = ijreq_stream_wrptr % IJ_STREAMS;
-			s = &streams_ij_req[si];
-			s_usbtmp.len = tud_midi_n_stream_read(0, 0, s_usbtmp.buf, BUF_LEN);
-			for (i = 0; i < s_usbtmp.len; i++) {
-				len = sysex_stream_check(s, s_usbtmp.buf[i]);
+		/* Push inject stream readen from USB-MIDI */
+		buf_rdy = ptr_ijreq_wr - ptr_ijreq_rd < BUFS_IJ;
+		if (buf_rdy) {
+			si = ptr_ijreq_wr % BUFS_IJ;
+			s = &buf_ijreq[si];
+			buf_tmp_usb.len = tud_midi_n_stream_read(0, 0, buf_tmp_usb.buf, BUF_LEN);
+			for (i = 0; i < buf_tmp_usb.len; i++) {
+				len = buf_append(s, buf_tmp_usb.buf[i]);
 				if (len > 0) {
-					if (do_echo & 1)
+					if (do_echo_usb)
 						printf("U2M %d\n", s->len);
 					__dmb();
-					ijreq_stream_wrptr++;
+					ptr_ijreq_wr++;
+					/* FIXME: remainder is discarded */
+					break;
 				}
 			}
 		}
 
-		/* Pull inject stream and write to UART/USB-CDC */
-		stream_ready = ijres_stream_wrptr != ijres_stream_rdptr;
-		if (stream_ready) {
-			si = ijres_stream_rdptr % IJ_STREAMS;
-			s = &streams_ij_res[si];
+		/* Pull inject stream and write to USB-MIDI */
+		buf_rdy = ptr_ijres_wr != ptr_ijres_rd;
+		if (buf_rdy) {
+			si = ptr_ijres_rd % BUFS_IJ;
+			s = &buf_ijres[si];
 			len = tud_midi_n_stream_write(0, 0, s->buf + ijres_tmp_pos, s->len - ijres_tmp_pos);
 			ijres_tmp_pos += len;
 			if (ijres_tmp_pos == s->len) {
-				if (do_echo & 1)
+				if (do_echo_usb)
 					printf("M2U %d\n", s->len);
 
-				stream_clear(s);
+				buf_clear(s);
 				ijres_tmp_pos = 0;
 				__dmb();
-				ijres_stream_rdptr++;
+				ptr_ijres_rd++;
 			}
 		}
 	}
