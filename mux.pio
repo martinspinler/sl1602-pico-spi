@@ -3,11 +3,10 @@
 .program mux
 
 .wrap_target
-mux_loop:
-	IN PINS 2
-	MOV OSR ISR
-	JMP PIN dm_default	; if the SEL pin is 0, propagate default pins
-	OUT NULL 1
-dm_default:
+	IN PINS 2                   ; first input bit is default, second is injected
+	MOV OSR ISR                 ; first output bit is injected value
+	JMP PIN skip_injected       ; if the SEL pin is 0, propagate default pins
+	OUT NULL 1					; throw away the injected bit value
+skip_injected:
 	OUT PINS 1
 .wrap

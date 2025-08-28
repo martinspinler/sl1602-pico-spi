@@ -8,6 +8,7 @@
 #include "pico/multicore.h"
 
 #include "mux.pio.h"
+#include "muxnss.pio.h"
 
 #include "bsp/board_api.h"
 #include "tusb.h"
@@ -17,7 +18,6 @@
  * but better is to use a timeout (when Pico reboots by software request
  * on the fly, there is no such further request from FW chip.)
  *
- * FIXME: When running osclive, the Recall button stuck everything until Pico reboot
  */
 
 #define P_IRQ1  12 // Input from DSPB
@@ -136,20 +136,34 @@ int init_hw()
 	gpio_put(P_IRQB, 1);
 	gpio_put(P_NSS1_DSPB, 1);
 
-	offset = pio_add_program(pio0, &mux_program);
-
 	mypio = pio_get_instance(0);
 	for (i = 12; i < 20; i++) {
 		hw_set_bits(&mypio->input_sync_bypass, (1u << i));
 	}
 
+	offset = pio_add_program(pio0, &mux_program);
 	for (i = 0; i < 4; i++) {
+		if (i == 2)
+			continue;
 		pio_gpio_init(pio0, i);
 
 		pio_sm_config c = mux_program_get_default_config(offset);
 		sm_config_set_in_pins(&c, 12 + i * 2);
 		sm_config_set_out_pins(&c, i, 1);
 		sm_config_set_jmp_pin(&c, i == 3 ? 26 : (20 + i));
+		sm_config_set_out_shift(&c, false, false, 1);
+		pio_sm_set_consecutive_pindirs(pio0, i, i, 1, true);
+		pio_sm_init(pio0, i, offset, &c);
+	}
+
+	offset = pio_add_program(pio0, &muxnss_program);
+	i = 2; {
+		pio_gpio_init(pio0, i);
+
+		pio_sm_config c = muxnss_program_get_default_config(offset);
+		sm_config_set_in_pins(&c, 22);
+		sm_config_set_out_pins(&c, i, 1);
+		sm_config_set_jmp_pin(&c, 5);
 		sm_config_set_out_shift(&c, false, false, 1);
 		pio_sm_set_consecutive_pindirs(pio0, i, i, 1, true);
 		pio_sm_init(pio0, i, offset, &c);

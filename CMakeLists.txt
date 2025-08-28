@@ -18,6 +18,7 @@ target_include_directories(${PROJECT} PUBLIC
 target_compile_options(${PROJECT} PUBLIC -DPICO_STDIO_USB_ENABLE_RESET_VIA_VENDOR_INTERFACE=1)
 
 pico_generate_pio_header(sl1602_spi_bridge ${CMAKE_CURRENT_LIST_DIR}/mux.pio)
+pico_generate_pio_header(sl1602_spi_bridge ${CMAKE_CURRENT_LIST_DIR}/muxnss.pio)
 
 target_link_libraries(${PROJECT} pico_stdlib hardware_spi hardware_pio pico_multicore tinyusb_device tinyusb_board)
 pico_add_extra_outputs(${PROJECT})

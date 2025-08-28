@@ -1,0 +1,24 @@
+.pio_version 0
+
+.program muxnss
+
+; This program is based on 'mux', but selects default input also whenever is nSS=1
+; JMP PIN must be set to nSS0 input
+; IN PIN offset must be set to SEL
+; For currrent pin layout is usable only for driving MISO0 (SEL=22, DEF=16, INJ=17)
+; and FIXME offsets must be changed for driving other pins
+
+clone_default:
+	IN PINS 27              ; INFO: use offset to default input pin
+	MOV OSR ISR
+	OUT PINS 1
+.wrap_target
+	JMP PIN clone_default   ; if the SS is inactive, jump to clone default values
+	IN NULL 32              ; clear ISR
+	IN PINS 1               ; get the SELECT pin
+	MOV X ISR
+	JMP !X clone_default    ; if the SEL is still 0, jump to clone default values
+	IN PINS 28              ; use offset to injected input pin
+	MOV OSR ISR
+	OUT PINS 1
+.wrap
