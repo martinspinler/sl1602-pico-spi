@@ -13,12 +13,6 @@
 #include "bsp/board_api.h"
 #include "tusb.h"
 
-/* FIXME: Enable injecting request after DSPB init.
- * DSPB init can be recognized by request from the FW chip,
- * but better is to use a timeout (when Pico reboots by software request
- * on the fly, there is no such further request from FW chip.)
- *
- */
 
 #define P_IRQ1  12 // Input from DSPB
 #define P_IRQB  13 // Output to CPB
@@ -405,8 +399,12 @@ void core1_main()
 	uint8_t si;
 	uint8_t ijres_inc;
 	bool buf_rdy;
+	bool inited = false;
 
 	struct sysex_buffer *ic0, *ic1, *ijreq, *ijres;
+
+	absolute_time_t to;
+	to = make_timeout_time_us(8000000);
 
 	do {
 		si = ptr_ic_wr % BUFS_IC;
@@ -471,7 +469,17 @@ void core1_main()
 		if (a0 || a1)
 			continue;
 
-		if (buf_cleared(ic0) && buf_cleared(ic1)) {
+
+		if (!inited) {
+			/* Enable injecting request after DSPB init.
+			 * DSPB init can be recognized by request from the FW chip,
+			 * but better is to use a timeout (when Pico reboots by software request
+			 * on the fly, there is no such further request from FW chip.)
+			 */
+			if (absolute_time_diff_us(to, get_absolute_time()) > 0) {
+				inited = true;
+			}
+		} else if (buf_cleared(ic0) && buf_cleared(ic1)) {
 			buf_rdy = ptr_ijreq_wr != ptr_ijreq_rd;
 
 			si = ptr_ijreq_rd % BUFS_IJREQ;
